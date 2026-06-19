@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>足球越位识别系统</title>
+<style>
+  :root {
+    --bg: #1a1a2e; --bg2: #16213e; --bg3: #0f3460;
+    --text: #e0e0e0; --text2: #888; --accent: #00d4ff;
+    --green: #00ff88; --red: #e94560; --yellow: #ffaa00;
+    --border: #333; --radius: 6px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+
+  .header { background: var(--bg2); padding: 12px 24px; display: flex; align-items: center; gap: 24px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  .header h1 { font-size: 18px; color: var(--accent); white-space: nowrap; }
+  .header select { background: var(--bg3); color: var(--text); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 8px; font-size: 13px; }
+
+  .section { margin: 12px 24px; }
+  .info { background: var(--bg3); border-left: 3px solid var(--accent); padding: 10px 16px; border-radius: 0 var(--radius) var(--radius) 0; font-size: 13px; line-height: 1.6; }
+  .info strong { color: var(--accent); }
+
+  /* Canvas */
+  .canvas-wrap { margin: 12px 24px; }
+  canvas { display: block; cursor: crosshair; border: 1px solid #333; border-radius: 4px; max-width: 100%; }
+
+  /* Point list */
+  .point-list { margin: 12px 24px; background: var(--bg2); border-radius: var(--radius); padding: 12px 16px; }
+  .point-list h3 { font-size: 14px; margin-bottom: 8px; color: var(--accent); }
+  .point-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; font-family: monospace; }
+  .point-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+  /* Buttons */
+  .btn-row { margin: 12px 24px; display: flex; gap: 12px; flex-wrap: wrap; }
+  button { padding: 8px 20px; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 600; }
+  .btn-accent { background: var(--accent); color: #000; }
+  .btn-accent:hover { background: #00b8e6; }
+  .btn-accent:disabled { background: #555; color: #999; cursor: not-allowed; }
+  .btn-red { background: var(--red); color: #fff; }
+  .btn-red:hover { background: #d63384; }
+  .btn-green { background: var(--green); color: #000; }
+  .btn-green:hover { background: #00cc6a; }
+  .btn-secondary { background: var(--bg3); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); }
+
+  /* Progress */
+  .progress-wrap { margin: 12px 24px; }
+  .progress-bar { width: 100%; height: 10px; background: var(--bg3); border-radius: 5px; overflow: hidden; }
+  .progress-bar .fill { height: 100%; background: var(--accent); border-radius: 5px; transition: width 0.5s; width: 0%; }
+  .progress-text { font-size: 12px; color: var(--text2); margin-top: 5px; }
+
+  /* Result */
+  .result-wrap { margin: 12px 24px; background: #000; border-radius: var(--radius); overflow: hidden; }
+  .result-wrap video { width: 100%; display: block; }
+  .stats { display: flex; gap: 12px; margin: 12px 24px; flex-wrap: wrap; }
+  .stat { background: var(--bg2); border-radius: var(--radius); padding: 10px 16px; min-width: 100px; }
+  .stat .val { font-size: 20px; font-weight: 700; }
+  .stat .lbl { font-size: 11px; color: var(--text2); margin-top: 2px; }
+
+  .error-msg { margin: 12px 24px; background: rgba(233,69,96,0.1); border: 1px solid var(--red); border-radius: var(--radius); padding: 10px 14px; font-size: 12px; color: var(--red); white-space: pre-wrap; }
+
+  .hint { margin: 12px 24px; font-size: 12px; color: var(--text2); }
+  #clickHint { color: var(--yellow); font-weight: 600; }
+
+  .loading-dot:after {
+    content: '';
+    animation: dots 1.5s steps(4, end) infinite;
+  }
+  @keyframes dots {
+    0%  { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '..'; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>⚽ 足球越位识别系统</h1>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label style="font-size:13px;">标定模式：</label>
+    <select id="modeSelect" onchange="onModeChange()">
+      <option value="four_corner">球场四角</option>
+      <option value="penalty_area">禁区四角</option>
+    </select>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label style="font-size:13px;">视频：</label>
+    <select id="vidSelect" onchange="onVideoChange()">
+      <option value="">-- 选择视频 --</option>
+    </select>
+  </div>
+  <button class="btn-secondary" onclick="document.getElementById('fileInput').click()" style="font-size:12px;padding:5px 12px;">📁 上传视频</button>
+  <input type="file" id="fileInput" accept="video/*" style="display:none" onchange="uploadVideo(event)">
+</div>
+
+<!-- Step 1: Mode info -->
+<div class="section info" id="modeInfo"></div>
+
+<!-- Step 2: Calibration canvas (large) -->
+<div class="canvas-wrap">
+  <canvas id="canvas"></canvas>
+</div>
+
+<!-- Hint -->
+<div class="hint" id="clickHint"></div>
+
+<!-- Point list -->
+<div class="point-list" id="pointList">
+  <h3>已选点（点击画布添加，右键删除最后一个）</h3>
+  <div id="points"></div>
+</div>
+
+<!-- Buttons: confirm / reset -->
+<div class="btn-row" id="calibBtnRow">
+  <button class="btn-accent" id="confirmBtn" onclick="confirmCalibration()" disabled>✅ 确认标定，开始处理</button>
+  <button class="btn-red" onclick="resetPoints()">🗑️ 清空重来</button>
+</div>
+
+<!-- Step 3: Processing options + progress -->
+<div id="processSection" style="display:none;">
+  <div class="section" style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;">
+    <div style="display:flex;align-items:center;gap:6px;font-size:13px;">
+      <label>帧采样间隔：</label>
+      <input type="number" id="everyN" value="3" min="1" max="30" style="width:56px;padding:4px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;">
+    </div>
+    <div style="display:flex;align-items:center;gap:6px;font-size:13px;">
+      <label>最大帧数（0=全部）：</label>
+      <input type="number" id="maxFrames" value="0" min="0" style="width:64px;padding:4px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:13px;">
+    </div>
+  </div>
+  <div class="btn-row">
+    <button class="btn-green" id="processBtn" onclick="startProcessing()">🚀 开始越位检测</button>
+  </div>
+  <div class="progress-wrap" id="progressWrap" style="display:none;">
+    <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
+    <div class="progress-text" id="progressText">准备中...</div>
+  </div>
+  <div class="error-msg" id="errorMsg" style="display:none;"></div>
+</div>
+
+<!-- Step 4: Result -->
+<div id="resultSection" style="display:none;">
+  <div class="stats" id="statsGrid"></div>
+  <div class="result-wrap">
+    <video id="resultVideo" controls muted></video>
+  </div>
+  <div class="btn-row">
+    <button class="btn-secondary" onclick="downloadResult()">⬇️ 下载结果视频</button>
+    <button class="btn-secondary" onclick="resetAll()" style="margin-left:auto;">🔄 重新标定</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+let state = {
+  videoPath: null,
+  videoName: null,
+  mode: 'four_corner',
+  points: [],        // [{px, py, wx, wy, label, color}]
+  taskId: null,
+};
+
+const MODE_CONFIG = {
+  four_corner: {
+    desc: `<strong>球场四角标定</strong>：请在画面中依次点击球场的四个角（按顺时针方向）：<br>
+      ① <span style="color:#00d4ff">左上角</span>（靠近自己这边的左角）→ 世界坐标 (0, 105)<br>
+      ② <span style="color:#00ff88">右上角</span>（靠近自己这边的右角）→ 世界坐标 (68, 105)<br>
+      ③ <span style="color:#ffaa00">右下角</span>（远端右角）→ 世界坐标 (68, 0)<br>
+      ④ <span style="color:#ff4466">左下角</span>（远端左角）→ 世界坐标 (0, 0)<br>
+      <span style="color:#e94560">注意：如果画面里看不到某个角，选一个能看到的最近点代替，系统会自动推算。</span>`,
+    expected: [
+      {label:'① 左上角(近左)', wx:0,   wy:105, color:'#00d4ff'},
+      {label:'② 右上角(近右)', wx:68,  wy:105, color:'#00ff88'},
+      {label:'③ 右下角(远右)', wx:68,  wy:0,   color:'#ffaa00'},
+      {label:'④ 左下角(远左)', wx:0,   wy:0,   color:'#ff4466'},
+    ]
+  },
+  penalty_area: {
+    desc: `<strong>禁区四角标定</strong>：请在画面中依次点击左侧禁区的四个角：<br>
+      ① <span style="color:#00d4ff">禁区上左</span> → (0, 58.25)<br>
+      ② <span style="color:#00ff88">禁区上右</span> → (16.5, 58.25)<br>
+      ③ <span style="color:#ffaa00">禁区下右</span> → (16.5, 42.75)<br>
+      ④ <span style="color:#ff4466">禁区下左</span> → (0, 42.75)<br>
+      <span style="color:#e94560">如果是右侧禁区，世界坐标会对称处理。</span>`,
+    expected: [
+      {label:'① 禁区上左', wx:0,    wy:58.25, color:'#00d4ff'},
+      {label:'② 禁区上右', wx:16.5, wy:58.25, color:'#00ff88'},
+      {label:'③ 禁区下右', wx:16.5, wy:42.75, color:'#ffaa00'},
+      {label:'④ 禁区下左', wx:0,    wy:42.75, color:'#ff4466'},
+    ]
+  }
+};
+
+// ── Init ────────────────────────────────────────────────────────────────────────
+onModeChange();
+loadVideoList();
+
+// ── Video list ───────────────────────────────────────────────────────────────
+async function loadVideoList() {
+  const resp = await fetch('/api/videos');
+  const data = await resp.json();
+  const sel = document.getElementById('vidSelect');
+  // Clear old options (keep first)
+  while (sel.options.length > 1) sel.remove(1);
+  if (data.videos) {
+    data.videos.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.path;
+      opt.textContent = `${v.name} (${v.size_mb} MB)`;
+      sel.appendChild(opt);
+    });
+  }
+}
+
+function onVideoChange() {
+  const sel = document.getElementById('vidSelect');
+  const path = sel.value;
+  if (!path) return;
+  state.videoPath = path;
+  state.videoName = path.split(/[\\/]/).pop();
+  state.points = [];
+  loadFirstFrame(path);
+}
+
+async function uploadVideo(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  alert('请将视频文件复制到项目目录（D:/workBuddy/越位识别/），然后刷新页面选择。\n\n当前选择：' + file.name);
+}
+
+// ── Mode ──────────────────────────────────────────────────────────────────────
+function onModeChange() {
+  state.mode = document.getElementById('modeSelect').value;
+  state.points = [];
+  document.getElementById('modeInfo').innerHTML = MODE_CONFIG[state.mode].desc;
+  updateHint();
+  renderAll();
+  document.getElementById('confirmBtn').disabled = true;
+  document.getElementById('processSection').style.display = 'none';
+  document.getElementById('resultSection').style.display = 'none';
+}
+
+// ── Load first frame ─────────────────────────────────────────────────────────
+let img = new Image();
+
+function loadFirstFrame(videoPath) {
+  const url = '/api/video/first_frame?path=' + encodeURIComponent(videoPath) + '&t=' + Date.now();
+  img.crossOrigin = 'anonymous';
+  img.onload = function() {
+    fitCanvas();
+    renderAll();
+    document.getElementById('confirmBtn').disabled = state.points.length < 4;
+  };
+  img.onerror = function() {
+    fetch(url).then(r => r.blob()).then(b => { img.src = URL.createObjectURL(b); });
+  };
+  img.src = url;
+}
+
+function fitCanvas() {
+  // Make canvas as wide as the content area (viewport width - 48px margin)
+  const maxW = window.innerWidth - 48;
+  const scale = Math.min(1, maxW / img.width);
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+}
+
+// ── Canvas interaction ───────────────────────────────────────────────────────
+canvas.addEventListener('click', function(e) {
+  if (state.points.length >= 4) {
+    // Overwrite mode: replace last point
+    // Actually, let's just ignore after 4
+    return;
+  }
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const scaleX = img.width / canvas.width;
+  const scaleY = img.height / canvas.height;
+  const px = mx * scaleX;
+  const py = my * scaleY;
+
+  const cfg = MODE_CONFIG[state.mode];
+  const exp = cfg.expected[state.points.length];
+  state.points.push({px, py, wx: exp.wx, wy: exp.wy, label: exp.label, color: exp.color});
+  renderAll();
+  updateHint();
+  if (state.points.length === 4) {
+    document.getElementById('confirmBtn').disabled = false;
+  }
+});
+
+canvas.addEventListener('contextmenu', function(e) {
+  e.preventDefault();
+  if (state.points.length > 0) {
+    state.points.pop();
+    renderAll();
+    updateHint();
+    document.getElementById('confirmBtn').disabled = true;
+  }
+});
+
+function renderAll() {
+  const scaleX = canvas.width / img.width;
+  const scaleY = canvas.height / img.height;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  state.points.forEach((p, i) => {
+    const x = p.px * scaleX;
+    const y = p.py * scaleY;
+    ctx.strokeStyle = p.color;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x-8,y); ctx.lineTo(x+8,y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x,y-8); ctx.lineTo(x,y+8); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x,y,6,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle = p.color;
+    ctx.font = 'bold 13px monospace';
+    ctx.fillText(p.label, x+10, y-8);
+    ctx.fillStyle = '#fff';
+    ctx.font = '11px monospace';
+    ctx.fillText(`(${Math.round(p.px)},${Math.round(p.py)})`, x+10, y+12);
+  });
+  updatePointList();
+}
+
+function updatePointList() {
+  const div = document.getElementById('points');
+  div.innerHTML = '';
+  state.points.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'point-row';
+    row.innerHTML = `
+      <div class="point-dot" style="background:${p.color}"></div>
+      <span>${p.label}</span>
+      <span style="color:#aaa">| 像素: (${Math.round(p.px)}, ${Math.round(p.py)})</span>
+      <span style="color:${p.color}">| 世界: (${p.wx}, ${p.wy})</span>
+    `;
+    div.appendChild(row);
+  });
+}
+
+function updateHint() {
+  const hint = document.getElementById('clickHint');
+  const cfg = MODE_CONFIG[state.mode];
+  if (state.points.length < 4) {
+    const next = cfg.expected[state.points.length];
+    hint.innerHTML = `👉 请点击：<span style="color:${next.color}">${next.label}</span> → 世界坐标 (${next.wx}, ${next.wy})`;
+  } else {
+    hint.innerHTML = '✅ 4个点已选完！请点击上方"确认标定，开始处理"按钮。';
+  }
+}
+
+function resetPoints() {
+  state.points = [];
+  renderAll();
+  updateHint();
+  document.getElementById('confirmBtn').disabled = true;
+}
+
+// ── Confirm calibration & start processing ───────────────────────────────────
+function confirmCalibration() {
+  if (state.points.length !== 4) return alert('需要4个点！');
+  
+  const calibJSON = {
+    calibration_mode: 'generic',
+    pixel_points: state.points.map(p => [Math.round(p.px), Math.round(p.py)]),
+    world_points: state.points.map(p => [p.wx, p.wy]),
+    image_size: [img.naturalWidth || img.width, img.naturalHeight || img.height],
+    note: `Manual calibration: ${state.mode}`,
+  };
+
+  // Show process section
+  document.getElementById('processSection').style.display = 'block';
+  document.getElementById('resultSection').style.display = 'none';
+  
+  // Auto-start processing
+  setTimeout(() => startProcessingWithCalib(calibJSON), 300);
+}
+
+async function startProcessingWithCalib(calibJSON) {
+  if (!state.videoPath) return alert('请先选择视频！');
+  
+  document.getElementById('processBtn').disabled = true;
+  document.getElementById('progressWrap').style.display = 'block';
+  document.getElementById('errorMsg').style.display = 'none';
+
+  const payload = {
+    video_path: state.videoPath,
+    calibration: calibJSON,
+    every_n: parseInt(document.getElementById('everyN').value) || 3,
+    max_frames: parseInt(document.getElementById('maxFrames').value) || 0,
+  };
+
+  try {
+    const resp = await fetch('/api/process', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.error) { showError(data.error); return; }
+    state.taskId = data.task_id;
+    pollTimer = setInterval(pollProgress, 1500);
+  } catch(err) {
+    showError('请求失败: ' + err.message);
+  }
+}
+
+let pollTimer = null;
+
+async function startProcessing() {
+  // This is called when user clicks "开始越位检测" manually
+  // We need the calib JSON — re-confirm
+  if (state.points.length !== 4) return alert('请先完成标定（4个点）！');
+  const calibJSON = {
+    calibration_mode: 'generic',
+    pixel_points: state.points.map(p => [Math.round(p.px), Math.round(p.py)]),
+    world_points: state.points.map(p => [p.wx, p.wy]),
+    image_size: [img.naturalWidth || img.width, img.naturalHeight || img.height],
+    note: `Manual calibration: ${state.mode}`,
+  };
+  await startProcessingWithCalib(calibJSON);
+}
+
+async function pollProgress() {
+  if (!state.taskId) return;
+  try {
+    const resp = await fetch(`/api/progress/${state.taskId}`);
+    const task = await resp.json();
+    if (task.error) { showError(task.error); clearInterval(pollTimer); return; }
+
+    const pct = task.progress || 0;
+    document.getElementById('progressFill').style.width = pct + '%';
+    
+    if (task.status === 'processing') {
+      document.getElementById('progressText').textContent = `处理中... ${pct}%`;
+    } else if (task.status === 'completed') {
+      document.getElementById('progressText').textContent = '✅ 处理完成！';
+      clearInterval(pollTimer);
+      showResult(task);
+    } else if (task.status === 'error') {
+      document.getElementById('progressText').textContent = '❌ 处理失败';
+      clearInterval(pollTimer);
+      showError(task.error || '未知错误');
+    }
+  } catch(err) {}
+}
+
+function showError(msg) {
+  const div = document.getElementById('errorMsg');
+  div.style.display = 'block';
+  div.textContent = msg;
+  document.getElementById('processBtn').disabled = false;
+}
+
+// ── Step 4: Show result ────────────────────────────────────────────────────
+function showResult(task) {
+  document.getElementById('resultSection').style.display = 'block';
+  const R = task.results;
+
+  document.getElementById('statsGrid').innerHTML = `
+    <div class="stat"><div class="val">${R.processed_frames}</div><div class="lbl">处理帧数</div></div>
+    <div class="stat"><div class="val" style="color:var(--red)">${R.offside_frames}</div><div class="lbl">越位帧</div></div>
+    <div class="stat"><div class="val" style="color:var(--accent)">${(R.processing_time_seconds||0).toFixed(1)}s</div><div class="lbl">处理耗时</div></div>
+  `;
+
+  const vid = document.getElementById('resultVideo');
+  vid.src = '/api/output_video/' + state.taskId + '?t=' + Date.now();
+  vid.load();
+}
+
+function downloadResult() {
+  if (!state.taskId) return;
+  window.open('/api/download/' + state.taskId, '_blank');
+}
+
+function resetAll() {
+  state.points = [];
+  state.taskId = null;
+  renderAll();
+  updateHint();
+  document.getElementById('confirmBtn').disabled = true;
+  document.getElementById('processSection').style.display = 'none';
+  document.getElementById('resultSection').style.display = 'none';
+}
+
+// ── Window resize: refit canvas ─────────────────────────────────────────────
+window.addEventListener('resize', function() {
+  if (img.src) {
+    fitCanvas();
+    renderAll();
+  }
+});
+</script>
+</body>
+</html>

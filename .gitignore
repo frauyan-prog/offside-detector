@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Model files (too large for git)
+*.pt
+*.onnx
+*.pth
+offside_detector/models/
+
+# Output files
+output/
+uploads/
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Debug files
+debug_*.py
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# WorkBuddy internal
+.workbuddy/
+
+# Temporary
+*.tmp
+*.bak
+.matplotlib/
+
+# Nested repos / experiments
+pnlcalib_test/
+web/task_state/
