@@ -787,6 +787,38 @@ class CenterCircleCalibrator(BaseCalibrator):
         calib_result.calibration_mode = "center_circle"
         calib_result.world_keypoints = world_pts
 
+        # ── DEBUG LOG ──
+        import os
+        log_path = os.path.join(os.path.dirname(__file__), "..", "output", "debug_log.txt")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n" + "="*60 + "\n")
+            f.write("[CALIB] CenterCircleCalibrator._build_from_2_points\n")
+            f.write(f"  is_vertical={is_vertical}, is_horizontal_field={is_horizontal_field}\n")
+            f.write(f"  attack_dir={attack_dir}\n")
+            f.write(f"  clicked points: p1=({p1_px:.1f},{p1_py:.1f}) p2=({p2_px:.1f},{p2_py:.1f})\n")
+            f.write(f"  dx={dx:.1f}, dy={dy:.1f}, line_len={line_len:.1f}px = 18.3m\n")
+            f.write("  PIXEL pts (4):\n")
+            for i, (px, py) in enumerate(pixel_pts):
+                f.write(f"    [{i}] ({px:.1f}, {py:.1f})\n")
+            f.write("  WORLD pts (4):\n")
+            for i, (wx, wy) in enumerate(world_pts):
+                f.write(f"    [{i}] ({wx:.1f}, {wy:.1f})\n")
+            f.write(f"  homography H (3x3):\n")
+            H = calib_result.homography_matrix
+            for row in H:
+                f.write(f"    [{row[0]:+.6e}  {row[1]:+.6e}  {row[2]:+.6e}]\n")
+            # Test: pixel->world->pixel roundtrip
+            import cv2
+            for i in range(4):
+                px, py = pixel_pts[i]
+                wx, wy = world_pts[i]
+                # Forward: pixel -> world (using H)
+                pt = np.array([[[px, py]]], dtype=np.float32)
+                wpt = cv2.perspectiveTransform(pt, H)
+                f.write(f"  Test[{i}]: pixel=({px:.0f},{py:.0f}) -> world=({wpt[0][0][0]:.1f},{wpt[0][0][1]:.1f}) expected=({wx:.1f},{wy:.1f})\n")
+            f.write("  NOTE: If world != expected, homography is inaccurate!\n")
+
         print(f"[CenterCircle] 2-point calibration: line={line_len:.0f}px → "
               f"18.3m, synthesised 4 points for homography")
         return calib_result

@@ -19,6 +19,7 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass, field
 from enum import Enum
+import os
 
 from .player_detector import PlayerDetection, FrameDetection
 from .view_transformer import ViewTransformer
@@ -79,6 +80,13 @@ class OffsideAnalyzer:
         self._LOCK_THRESHOLD: int = 30  # Frames needed to lock direction
         self._total_frames_analyzed: int = 0
         self.attack_dir_override: Optional[str] = None  # "top_to_bottom" or "bottom_to_top"
+
+    def _debug_log(self, msg: str):
+        """Append a debug message to output/debug_log.txt."""
+        log_path = os.path.join(os.path.dirname(__file__), "..", "output", "debug_log.txt")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
 
     def analyze(self, frame_det: FrameDetection) -> OffsideResult:
         """
@@ -189,6 +197,7 @@ class OffsideAnalyzer:
             override = AttackDirection(self.attack_dir_override)
             self._attack_direction = override
             self._direction_locked = True
+            self._debug_log(f"[AttackDir] OVERRIDE: {override.value}")
             return override
 
         # If already locked, return cached direction
@@ -273,12 +282,14 @@ class OffsideAnalyzer:
                 p.foot_position[0], p.foot_position[1]
             )
             if world is not None:
+                px, py = float(p.foot_position[0]), float(p.foot_position[1])
+                wx, wy = float(world[0]), float(world[1])
                 players.append({
                     "track_id": p.track_id,
-                    "world_x": float(world[0]),
-                    "world_y": float(world[1]),
-                    "pixel_x": float(p.foot_position[0]),
-                    "pixel_y": float(p.foot_position[1]),
+                    "world_x": wx,
+                    "world_y": wy,
+                    "pixel_x": px,
+                    "pixel_y": py,
                     "team": p.team,
                     "class_name": p.class_name,
                     "confidence": float(p.confidence),
@@ -496,12 +507,22 @@ class OffsideAnalyzer:
             top_pixel = self.transformer.world_to_pixel(offside_pos, 0)
             bot_pixel = self.transformer.world_to_pixel(offside_pos, self.field_length)
             if top_pixel is not None and bot_pixel is not None:
+                # ── DEBUG ──
+                self._debug_log(f"[OffsideLine] horizontal attack: world_x={offside_pos:.1f}")
+                self._debug_log(f"  top_pixel (wx={offside_pos:.1f}, wy=0)   -> px=({top_pixel[0]:.1f}, {top_pixel[1]:.1f})")
+                self._debug_log(f"  bot_pixel (wx={offside_pos:.1f}, wy={self.field_length:.1f}) -> px=({bot_pixel[0]:.1f}, {bot_pixel[1]:.1f})")
+                self._debug_log(f"  line dx = {abs(top_pixel[0]-bot_pixel[0]):.1f}px (should be near 0 for vertical line)")
                 return np.array([top_pixel, bot_pixel], dtype=np.float32)
         else:
             # Vertical attack: draw horizontal offside line (parallel to goal lines)
             left_pixel = self.transformer.world_to_pixel(0, offside_pos)
             right_pixel = self.transformer.world_to_pixel(self.field_width, offside_pos)
             if left_pixel is not None and right_pixel is not None:
+                # ── DEBUG ──
+                self._debug_log(f"[OffsideLine] vertical attack: world_y={offside_pos:.1f}")
+                self._debug_log(f"  left_pixel (wx=0, wy={offside_pos:.1f})  -> px=({left_pixel[0]:.1f}, {left_pixel[1]:.1f})")
+                self._debug_log(f"  right_pixel (wx={self.field_width:.1f}, wy={offside_pos:.1f}) -> px=({right_pixel[0]:.1f}, {right_pixel[1]:.1f})")
+                self._debug_log(f"  line dy = {abs(left_pixel[1]-right_pixel[1]):.1f}px (should be near 0 for horizontal line)")
                 return np.array([left_pixel, right_pixel], dtype=np.float32)
 
         return None
