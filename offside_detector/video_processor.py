@@ -133,6 +133,7 @@ class VideoProcessor:
         interactive_calibrate: bool = False,
         calibration_file: Optional[str] = None,
         calib_mode: Optional[str] = None,
+        attack_dir_override: Optional[str] = None,
     ) -> ProcessingResult:
         """
         Process a video file and detect offside situations.
@@ -143,6 +144,7 @@ class VideoProcessor:
             interactive_calibrate: If True, open calibration window on first frame
             calibration_file: Path to pre-saved calibration JSON
             calib_mode: "penalty_area", "four_corner", "generic", or None for auto-prompt
+            attack_dir_override: Attack direction for center_circle mode (e.g., "left_to_right")
 
         Returns:
             ProcessingResult with statistics and output paths
@@ -178,7 +180,8 @@ class VideoProcessor:
               f"Size: {width}x{height}")
 
         # --- Step 0: Calibration ---
-        self._setup_calibration(cap, config, calib_mode, video_path)
+        self._setup_calibration(cap, config, calib_mode, video_path,
+                                attack_dir_override=attack_dir_override)
 
         if not self.transformer.is_ready:
             print("[VideoProcessor] ERROR: Field calibration failed. Cannot proceed.")
@@ -331,7 +334,8 @@ class VideoProcessor:
 
         return result
 
-    def _setup_calibration(self, cap, config: ProcessingConfig, calib_mode: Optional[str] = None, video_path: Optional[str] = None):
+    def _setup_calibration(self, cap, config: ProcessingConfig, calib_mode: Optional[str] = None,
+                            video_path: Optional[str] = None, attack_dir_override: Optional[str] = None):
         """Setup field calibration before processing."""
         ret, first_frame = cap.read()
         if not ret:
@@ -368,7 +372,8 @@ class VideoProcessor:
                 return
             else:
                 print("[VideoProcessor] Auto detection failed, falling back to manual...")
-                result = self.calibrator.calibrate_interactive(first_frame, mode=calib_mode)
+                result = self.calibrator.calibrate_interactive(first_frame, mode=calib_mode,
+                                                              attack_dir=attack_dir_override)
                 if result and result.is_reliable:
                     self._apply_calibration(result)
                     # Save calibration for future use
@@ -390,15 +395,24 @@ class VideoProcessor:
             else:
                 print("[VideoProcessor] Auto detection failed, falling back to manual...")
 
-        # Priority 4: Fallback to interactive
-        if config.calibration_mode not in ("interactive", "file"):
-            print("[VideoProcessor] Switching to interactive calibration mode...")
-            result = self.calibrator.calibrate_interactive(first_frame, mode=calib_mode)
-            if result and result.is_reliable:
-                self._apply_calibration(result)
-                if config.output_video_path:
-                    calib_path = config.output_video_path.replace(".mp4", "_calibration.json")
-                    self.calibrator.save_calibration(result, calib_path)
+        # Priority 4: Interactive calibration
+        # Use calib_mode parameter if provided, otherwise fall back to config.calibration_mode
+        effective_mode = calib_mode if calib_mode else config.calibration_mode
+        # Always enter interactive mode if we reach here (Priority 1-3 all failed)
+        print(f"[VideoProcessor] Switching to interactive calibration (mode={effective_mode})...")
+        if effective_mode == "interactive":
+            result = self.calibrator.calibrate_interactive(first_frame, mode=None,
+                                                              attack_dir=attack_dir_override)
+        else:
+            result = self.calibrator.calibrate_interactive(first_frame, mode=effective_mode,
+                                                          attack_dir=attack_dir_override)
+        if result and result.is_reliable:
+            self._apply_calibration(result)
+            if config.output_video_path:
+                calib_path = config.output_video_path.replace(".mp4", "_calibration.json")
+                self.calibrator.save_calibration(result, calib_path)
+        else:
+            print("[VideoProcessor] Interactive calibration cancelled or failed.")
 
     def _apply_calibration(self, result: FieldDetectionResult):
         """Apply calibration result to the transformer."""

@@ -26,9 +26,16 @@ from .view_transformer import ViewTransformer
 
 class AttackDirection(Enum):
     """Which direction the attacking team is playing."""
-    TOP_TO_BOTTOM = "top_to_bottom"    # attacking toward y=105
-    BOTTOM_TO_TOP = "bottom_to_top"    # attacking toward y=0
+    TOP_TO_BOTTOM = "top_to_bottom"    # attacking toward y=105 (goal at bottom)
+    BOTTOM_TO_TOP = "bottom_to_top"    # attacking toward y=0 (goal at top)
+    LEFT_TO_RIGHT = "left_to_right"    # attacking toward x=68 (goal at right)
+    RIGHT_TO_LEFT = "right_to_left"    # attacking toward x=0 (goal at left)
     UNKNOWN = "unknown"
+
+
+def _is_horizontal_attack(attack_dir: AttackDirection) -> bool:
+    """Check if attack direction is horizontal (field length along image X axis)."""
+    return attack_dir in (AttackDirection.LEFT_TO_RIGHT, AttackDirection.RIGHT_TO_LEFT)
 
 
 @dataclass
@@ -116,7 +123,10 @@ class OffsideAnalyzer:
             return result
 
         # Step 5: Calculate offside line
-        offside_y = second_last_def["world_y"]
+        if _is_horizontal_attack(attack_dir):
+            offside_y = second_last_def["world_x"]  # length axis is X for horizontal
+        else:
+            offside_y = second_last_def["world_y"]   # length axis is Y for vertical
         result.offside_line_y = offside_y
         result.second_last_defender = second_last_def
 
@@ -316,18 +326,30 @@ class OffsideAnalyzer:
                 defenders.append(p)
             else:
                 # Unknown team — use world position heuristic
-                midpoint = self.field_length / 2.0
-                if attack_dir == AttackDirection.TOP_TO_BOTTOM:
-                    # Attacking toward y=105: players with world_y > midpoint are attackers
-                    if p["world_y"] > midpoint:
-                        attackers.append(p)
-                    else:
-                        defenders.append(p)
-                else:  # BOTTOM_TO_TOP
-                    if p["world_y"] < midpoint:
-                        attackers.append(p)
-                    else:
-                        defenders.append(p)
+                if _is_horizontal_attack(attack_dir):
+                    midpoint = self.field_width / 2.0  # 34
+                    if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                        if p["world_x"] > midpoint:
+                            attackers.append(p)
+                        else:
+                            defenders.append(p)
+                    else:  # RIGHT_TO_LEFT
+                        if p["world_x"] < midpoint:
+                            attackers.append(p)
+                        else:
+                            defenders.append(p)
+                else:
+                    midpoint = self.field_length / 2.0  # 52.5
+                    if attack_dir == AttackDirection.TOP_TO_BOTTOM:
+                        if p["world_y"] > midpoint:
+                            attackers.append(p)
+                        else:
+                            defenders.append(p)
+                    else:  # BOTTOM_TO_TOP
+                        if p["world_y"] < midpoint:
+                            attackers.append(p)
+                        else:
+                            defenders.append(p)
 
         return attackers, defenders
 
@@ -343,21 +365,33 @@ class OffsideAnalyzer:
         The "last defender" is the one CLOSEST to their own goal.
         The "second-last defender" is the one just before that.
 
-        Attack direction determines which goal we measure distance to:
-          - TOP_TO_BOTTOM (attacking toward y=105): distance = |world_y - 105|
-          - BOTTOM_TO_TOP (attacking toward y=0):  distance = |world_y - 0|
+        Attack direction determines which axis and goal we measure distance to:
+          - TOP_TO_BOTTOM (attacking toward y=105):  sort by world_y DESCENDING
+          - BOTTOM_TO_TOP (attacking toward y=0):    sort by world_y ASCENDING
+          - LEFT_TO_RIGHT (attacking toward x=68):   sort by world_x DESCENDING
+          - RIGHT_TO_LEFT (attacking toward x=0):     sort by world_x ASCENDING
         """
         if len(defenders) < 1:
             return None
 
-        if attack_dir == AttackDirection.TOP_TO_BOTTOM:
-            # Attacking toward y=105 (far goal line)
-            # Closest to goal = highest world_y → sort DESCENDING
-            sorted_defs = sorted(defenders, key=lambda p: -p["world_y"])
+        if _is_horizontal_attack(attack_dir):
+            # Horizontal attack: field length along world X axis
+            if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                # Attacking toward x=68 (right goal) — closest = highest world_x
+                sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
+            else:  # RIGHT_TO_LEFT
+                # Attacking toward x=0 (left goal) — closest = lowest world_x
+                sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
         else:
-            # Attacking toward y=0 (near goal line)
-            # Closest to goal = lowest world_y → sort ASCENDING
-            sorted_defs = sorted(defenders, key=lambda p: p["world_y"])
+            # Vertical attack: field length along world Y axis
+            if attack_dir == AttackDirection.TOP_TO_BOTTOM:
+                # Attacking toward y=105 (far goal line)
+                # Closest to goal = highest world_y → sort DESCENDING
+                sorted_defs = sorted(defenders, key=lambda p: -p["world_y"])
+            else:  # BOTTOM_TO_TOP
+                # Attacking toward y=0 (near goal line)
+                # Closest to goal = lowest world_y → sort ASCENDING
+                sorted_defs = sorted(defenders, key=lambda p: p["world_y"])
 
         # ── DEBUG: log all defenders sorted by proximity to goal ──
         self._log_defenders(sorted_defs, attack_dir)
@@ -372,16 +406,23 @@ class OffsideAnalyzer:
         """Log defender positions for manual verification."""
         print(f"\n  [Defenders] ({len(sorted_defs)} total, "
               f"attack_dir={attack_dir.value}):")
-        goal_y = 105 if attack_dir == AttackDirection.TOP_TO_BOTTOM else 0
+        horizontal = _is_horizontal_attack(attack_dir)
+        if horizontal:
+            goal_val = 68 if attack_dir == AttackDirection.LEFT_TO_RIGHT else 0
+            axis_name = "world_x"
+        else:
+            goal_val = 105 if attack_dir == AttackDirection.TOP_TO_BOTTOM else 0
+            axis_name = "world_y"
         for i, d in enumerate(sorted_defs):
-            dist_to_goal = abs(d["world_y"] - goal_y)
+            pos_val = d[axis_name]
+            dist_to_goal = abs(pos_val - goal_val)
             marker = ""
             if i == 0:
                 marker = " ← LAST (GK?)"
             elif i == 1:
                 marker = " ← SECOND-LAST → OFFSIDE LINE"
             print(f"    [{i}] id=#{d.get('track_id','?')} {d.get('class_name','?')} "
-                  f"team={d.get('team','?')} world_y={d['world_y']:.1f} "
+                  f"team={d.get('team','?')} {axis_name}={pos_val:.1f} "
                   f"dist_to_goal={dist_to_goal:.1f}{marker}")
 
     def _check_offside_players(
@@ -397,44 +438,71 @@ class OffsideAnalyzer:
         than the offside reference line.
 
         Note: This only checks position, not involvement in play.
+        For horizontal attacks, offside_y actually contains world_x value.
         """
         offside = []
+        horizontal = _is_horizontal_attack(attack_dir)
 
         for p in attackers:
             is_offside = False
-            if attack_dir == AttackDirection.TOP_TO_BOTTOM:
-                # Attacking toward y=105:
-                # Player is offside if world_y > offside_y (closer to y=105)
-                if p["world_y"] > offside_y + 0.1:
-                    is_offside = True
+            if horizontal:
+                if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                    # Attacking toward x=68: offside if world_x > offside_line
+                    if p["world_x"] > offside_y + 0.1:
+                        is_offside = True
+                else:  # RIGHT_TO_LEFT
+                    # Attacking toward x=0: offside if world_x < offside_line
+                    if p["world_x"] < offside_y - 0.1:
+                        is_offside = True
             else:
-                # Attacking toward y=0:
-                # Player is offside if world_y < offside_y (closer to y=0)
-                if p["world_y"] < offside_y - 0.1:
-                    is_offside = True
+                if attack_dir == AttackDirection.TOP_TO_BOTTOM:
+                    # Attacking toward y=105:
+                    # Player is offside if world_y > offside_y (closer to y=105)
+                    if p["world_y"] > offside_y + 0.1:
+                        is_offside = True
+                else:  # BOTTOM_TO_TOP
+                    # Attacking toward y=0:
+                    # Player is offside if world_y < offside_y (closer to y=0)
+                    if p["world_y"] < offside_y - 0.1:
+                        is_offside = True
 
             if is_offside:
                 p_copy = dict(p)
-                p_copy["distance_offside"] = abs(p["world_y"] - offside_y)
+                if horizontal:
+                    p_copy["distance_offside"] = abs(p["world_x"] - offside_y)
+                else:
+                    p_copy["distance_offside"] = abs(p["world_y"] - offside_y)
                 offside.append(p_copy)
 
         return offside
 
-    def _calculate_offside_pixel_line(self, world_y: float) -> Optional[np.ndarray]:
+    def _calculate_offside_pixel_line(self, offside_pos: float) -> Optional[np.ndarray]:
         """
         Calculate the offside line as pixel coordinates for drawing.
 
-        Returns a line from left touchline to right touchline at world_y.
+        For vertical attacks (TOP_TO_BOTTOM/BOTTOM_TO_TOP):
+          Returns a line from left touchline (x=0) to right touchline (x=68)
+          at the given world_y position.
+        For horizontal attacks (LEFT_TO_RIGHT/RIGHT_TO_LEFT):
+          Returns a line from bottom goal-line (y=0) to top goal-line (y=105)
+          at the given world_x position.
         """
-        if world_y is None:
+        if offside_pos is None:
             return None
 
-        # Sample points across the width of the field
-        left_pixel = self.transformer.world_to_pixel(0, world_y)
-        right_pixel = self.transformer.world_to_pixel(self.field_width, world_y)
-
-        if left_pixel is not None and right_pixel is not None:
-            return np.array([left_pixel, right_pixel], dtype=np.float32)
+        attack_dir = self._attack_direction
+        if _is_horizontal_attack(attack_dir):
+            # Horizontal attack: draw vertical offside line (parallel to goal lines)
+            top_pixel = self.transformer.world_to_pixel(offside_pos, 0)
+            bot_pixel = self.transformer.world_to_pixel(offside_pos, self.field_length)
+            if top_pixel is not None and bot_pixel is not None:
+                return np.array([top_pixel, bot_pixel], dtype=np.float32)
+        else:
+            # Vertical attack: draw horizontal offside line (parallel to goal lines)
+            left_pixel = self.transformer.world_to_pixel(0, offside_pos)
+            right_pixel = self.transformer.world_to_pixel(self.field_width, offside_pos)
+            if left_pixel is not None and right_pixel is not None:
+                return np.array([left_pixel, right_pixel], dtype=np.float32)
 
         return None
 

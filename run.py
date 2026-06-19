@@ -135,11 +135,14 @@ Examples:
         help="Only output frames with offside",
     )
     parser.add_argument(
-        "--attack-dir", type=str, choices=["top_to_bottom", "bottom_to_top"],
+        "--attack-dir", type=str,
+        choices=["top_to_bottom", "bottom_to_top", "left_to_right", "right_to_left"],
         default=None,
         help="Manually specify attack direction (override auto-detection). "
              "top_to_bottom = attacking toward y=105 (goal at bottom), "
-             "bottom_to_top = attacking toward y=0 (goal at top)",
+             "bottom_to_top = attacking toward y=0 (goal at top), "
+             "left_to_right = attacking toward x=68 (goal at right), "
+             "right_to_left = attacking toward x=0 (goal at left)",
     )
 
     # Mode
@@ -176,7 +179,7 @@ Examples:
         skip_when_no_offside=args.only_offside,
         resize_width=args.resize,
         calibration_file=args.calibration,
-        calibration_mode="auto" if args.calib_mode == "auto" else ("interactive" if not args.calibration and not args.api_key else "manual"),
+        calibration_mode=args.calib_mode if args.calib_mode else ("auto" if not args.calibration and not args.api_key else "interactive"),
         yolo_model_size=args.yolo_model,
         player_confidence=args.confidence,
         attack_dir_override=args.attack_dir,
@@ -220,6 +223,7 @@ def run_batch(args, config):
         interactive_calibrate=force_interactive,
         calibration_file=args.calibration,
         calib_mode=args.calib_mode,
+        attack_dir_override=args.attack_dir,
     )
 
     return result

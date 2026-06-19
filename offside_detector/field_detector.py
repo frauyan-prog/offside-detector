@@ -631,7 +631,7 @@ class CenterCircleCalibrator(BaseCalibrator):
         "② 点击：中圈直径右端",
     ]
 
-    def calibrate(self, frame: np.ndarray) -> Optional[FieldDetectionResult]:
+    def calibrate(self, frame: np.ndarray, attack_dir: str = None) -> Optional[FieldDetectionResult]:
         """Run 2-point center circle calibration."""
         result = self._run_ui(
             frame,
@@ -643,21 +643,28 @@ class CenterCircleCalibrator(BaseCalibrator):
         if result is None:
             return None
 
-        return self._build_from_2_points(result)
+        return self._build_from_2_points(result, attack_dir=attack_dir)
 
     def _build_from_2_points(
         self, pixel_points: List[Tuple[float, float]],
+        attack_dir: str = None,
     ) -> FieldDetectionResult:
         """
         Build a 4-point homography from 2 user-clicked points on the
-        center circle's horizontal diameter.
+        center circle's diameter.
 
         Approach:
           1. World coords for the 2 clicked points (real + virtual).
           2. Synthesize 2 virtual pixel points perpendicular to the
              clicked line at its midpoint, offset by a fraction of
-             the line length (to estimate 10m depth in image space).
+             the line length (to estimate depth in image space).
           3. Compute homography from 4 point pairs.
+
+        attack_dir: Optional override for field orientation.
+          - "left_to_right" / "right_to_left": Field length is horizontal
+            in image; vertical diameter maps to WIDTH axis (world_x).
+          - None / "top_to_bottom" / "bottom_to_top": Original behavior.
+            Vertical diameter maps to LENGTH axis (world_y).
         """
         p1_px, p1_py = pixel_points[0]
         p2_px, p2_py = pixel_points[1]
@@ -713,8 +720,40 @@ class CenterCircleCalibrator(BaseCalibrator):
         # If |dx| > |dy|: diameter appears horizontal (along x-axis / width)
         is_vertical = abs(dy) > abs(dx)
 
-        if is_vertical:
-            # Diameter along y-axis (center line direction).
+        # Check if field is horizontally oriented (goals left-right)
+        is_horizontal_field = attack_dir in ("left_to_right", "right_to_left")
+
+        if is_vertical and is_horizontal_field:
+            # ── HORIZONTAL FIELD ORIENTATION ──
+            # Field length runs left-right in image; vertical diameter in
+            # image = WIDTH direction (touchline-to-touchline), NOT length.
+            # Both clicked points are at world_y=52.5 (center line), with
+            # different world_x values.
+
+            # Determine which clicked point maps to which side of width.
+            # Upper point in image -> depends on camera angle, but we use
+            # consistent mapping: upper->left(x=cx-r), lower->right(x=cx+r).
+            # The attack_dir determines which direction "toward goal" means.
+            if p1_py < p2_py:
+                # p1 is above p2 in image
+                world_pts = np.array([
+                    [cx - r, cy],         # 0: p1 (upper) → left on center line
+                    [cx + r, cy],         # 1: p2 (lower) → right on center line
+                    [cx + r, cy - vert],  # 2: virtual: right + toward goal (y-)
+                    [cx - r, cy + vert],  # 3: virtual: left  + away from goal (y+)
+                ], dtype=np.float32)
+            else:
+                world_pts = np.array([
+                    [cx + r, cy],         # 0: p1 (lower) → right on center line
+                    [cx - r, cy],         # 1: p2 (upper) → left on center line
+                    [cx - r, cy - vert],  # 2: virtual: left  + toward goal (y-)
+                    [cx + r, cy + vert],  # 3: virtual: right + away from goal (y+)
+                ], dtype=np.float32)
+
+            print(f"[CenterCircle] HORIZONTAL FIELD mode (attack={attack_dir}): "
+                  f"vertical diameter → width axis (world_x)")
+        elif is_vertical:
+            # Diameter along y-axis (center line direction). Standard vertical field.
             if p1_py > p2_py:
                 # p1 is lower in image (near goal) -> world y = cy - r
                 world_pts = np.array([
@@ -783,6 +822,7 @@ class ManualFieldCalibrator:
     def calibrate_interactive(
         self, frame: np.ndarray,
         mode: Optional[str] = None,
+        attack_dir: Optional[str] = None,
     ) -> Optional[FieldDetectionResult]:
         """
         Run interactive calibration.
@@ -790,6 +830,7 @@ class ManualFieldCalibrator:
         Args:
             frame: First frame of the video (BGR numpy array)
             mode: "penalty_area", "four_corner", "generic", "center_circle", or None for auto-prompt
+            attack_dir: Attack direction override ("left_to_right", etc.) for center_circle mode
 
         Returns:
             FieldDetectionResult or None if cancelled
@@ -806,7 +847,7 @@ class ManualFieldCalibrator:
         elif mode == "generic":
             return self._generic.calibrate(frame)
         elif mode == "center_circle":
-            return self._center_circle.calibrate(frame)
+            return self._center_circle.calibrate(frame, attack_dir=attack_dir)
         else:
             print(f"[Calibration] Unknown mode: {mode}")
             return None
