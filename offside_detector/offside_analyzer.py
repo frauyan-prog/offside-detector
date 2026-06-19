@@ -336,11 +336,25 @@ class OffsideAnalyzer:
             elif p["team"] == "defending":
                 defenders.append(p)
             else:
-                # Unknown team — use world position heuristic
+                # Unknown team — use position heuristic
+                # Prefer pixel position when world coords may be unreliable
                 if _is_horizontal_attack(attack_dir):
                     midpoint = self.field_width / 2.0  # 34
+                    # Check if world_x is reliable
+                    wx = p.get("world_x", 0)
+                    px = p.get("pixel_x", 0)
+                    img_mid = px  # placeholder - we use pixel midpoint heuristic
+                    # For left_to_right: right half of image = attackers (near goal they attack)
+                    # Use pixel_x as fallback when world_x is clearly wrong
+                    use_pixel = abs(wx) > 100 or wx < -10  # OOB detection
                     if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                        if p["world_x"] > midpoint:
+                        if use_pixel:
+                            # Image is ~1184 wide; attackers on right side
+                            if px > 1184 / 2:
+                                attackers.append(p)
+                            else:
+                                defenders.append(p)
+                        elif p["world_x"] > midpoint:
                             attackers.append(p)
                         else:
                             defenders.append(p)
@@ -381,60 +395,130 @@ class OffsideAnalyzer:
           - BOTTOM_TO_TOP (attacking toward y=0):    sort by world_y ASCENDING
           - LEFT_TO_RIGHT (attacking toward x=68):   sort by world_x DESCENDING
           - RIGHT_TO_LEFT (attacking toward x=0):     sort by world_x ASCENDING
+
+        FALLBACK: If world coordinates are clearly unreliable (many defenders
+        have coords outside field bounds), fall back to PIXEL-POSITION sorting.
+        This handles the case where a 2-point similarity transform produces
+        garbage for points far from calibration region.
         """
         if len(defenders) < 1:
             return None
 
+        # ── Determine if world coords are reliable ──
+        use_pixel_fallback = self._should_use_pixel_fallback(defenders, attack_dir)
+
         if _is_horizontal_attack(attack_dir):
-            # Horizontal attack: field length along world X axis
-            if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                # Attacking toward x=68 (right goal) — closest = highest world_x
-                sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
-            else:  # RIGHT_TO_LEFT
-                # Attacking toward x=0 (left goal) — closest = lowest world_x
-                sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
+            if use_pixel_fallback:
+                # Fallback: use pixel_x position directly
+                # For left_to_right attack, goal is on the RIGHT side of image
+                # → defender closest to goal = highest pixel_x
+                if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                    sorted_defs = sorted(defenders, key=lambda p: -p.get("pixel_x", 0))
+                else:
+                    sorted_defs = sorted(defenders, key=lambda p: p.get("pixel_x", 0))
+            else:
+                # Normal: use world_x
+                if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                    sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
+                else:
+                    sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
         else:
             # Vertical attack: field length along world Y axis
-            if attack_dir == AttackDirection.TOP_TO_BOTTOM:
-                # Attacking toward y=105 (far goal line)
-                # Closest to goal = highest world_y → sort DESCENDING
-                sorted_defs = sorted(defenders, key=lambda p: -p["world_y"])
-            else:  # BOTTOM_TO_TOP
-                # Attacking toward y=0 (near goal line)
-                # Closest to goal = lowest world_y → sort ASCENDING
-                sorted_defs = sorted(defenders, key=lambda p: p["world_y"])
+            if use_pixel_fallback:
+                if attack_dir == AttackDirection.TOP_TO_BOTTOM:
+                    sorted_defs = sorted(defenders, key=lambda p: -p.get("pixel_y", 0))
+                else:
+                    sorted_defs = sorted(defenders, key=lambda p: p.get("pixel_y", 0))
+            else:
+                if attack_dir == AttackDirection.TOP_TO_BOTTOM:
+                    sorted_defs = sorted(defenders, key=lambda p: -p["world_y"])
+                else:
+                    sorted_defs = sorted(defenders, key=lambda p: p["world_y"])
 
-        # ── DEBUG: log all defenders sorted by proximity to goal ──
-        self._log_defenders(sorted_defs, attack_dir)
+        # DEBUG: log all defenders sorted by proximity to goal
+        self._log_defenders(sorted_defs, attack_dir, use_pixel_fallback)
 
         if len(sorted_defs) >= 2:
             return sorted_defs[1]  # Second-last defender = offside reference line
         else:
-            # Only one defender: use them as the reference
             return sorted_defs[0]
 
-    def _log_defenders(self, sorted_defs: List[Dict], attack_dir: AttackDirection):
+    def _should_use_pixel_fallback(
+        self, defenders: List[Dict], attack_dir: AttackDirection
+    ) -> bool:
+        """
+        Check if world coordinates are reliable enough for sorting.
+
+        Returns True if too many defenders have out-of-bounds world coordinates,
+        indicating the homography is inaccurate far from calibration points.
+
+        Thresholds: world_x must be in [0, 68], world_y in [0, 105].
+        If >40% of defenders are out of bounds, use pixel fallback.
+        """
+        if len(defenders) == 0:
+            return False
+
+        out_of_bounds_count = 0
+        for d in defenders:
+            wx = d.get("world_x")
+            wy = d.get("world_y")
+            if wx is None or wy is None:
+                out_of_bounds_count += 1
+                continue
+            # Check if within field bounds (with small tolerance)
+            if _is_horizontal_attack(attack_dir):
+                if wx < -5 or wx > 73:  # tolerance of 5m beyond field edge
+                    out_of_bounds_count += 1
+            else:
+                if wy < -5 or wy > 110:
+                    out_of_bounds_count += 1
+
+        ratio = out_of_bounds_count / len(defenders)
+        use_fallback = ratio > 0.4  # >40% OOB → use pixel fallback
+
+        if use_fallback:
+            self._debug_log(f"[DefenderSort] PIXEL FALLBACK activated: "
+                           f"{out_of_bounds_count}/{len(defenders)} defenders "
+                           f"OOB ({ratio*100:.0f}%)")
+
+        return use_fallback
+
+    def _log_defenders(self, sorted_defs: List[Dict], attack_dir: AttackDirection,
+                       use_pixel_fallback: bool = False):
         """Log defender positions for manual verification."""
+        mode_label = "PIXEL" if use_pixel_fallback else "WORLD"
         print(f"\n  [Defenders] ({len(sorted_defs)} total, "
-              f"attack_dir={attack_dir.value}):")
+              f"attack_dir={attack_dir.value}, sort={mode_label}):")
         horizontal = _is_horizontal_attack(attack_dir)
-        if horizontal:
-            goal_val = 68 if attack_dir == AttackDirection.LEFT_TO_RIGHT else 0
-            axis_name = "world_x"
+        if use_pixel_fallback:
+            if horizontal:
+                axis_name = "pixel_x"
+                goal_val = 999999 if attack_dir == AttackDirection.LEFT_TO_RIGHT else 0
+            else:
+                axis_name = "pixel_y"
+                goal_val = 999999 if attack_dir == AttackDirection.TOP_TO_BOTTOM else 0
         else:
-            goal_val = 105 if attack_dir == AttackDirection.TOP_TO_BOTTOM else 0
-            axis_name = "world_y"
+            if horizontal:
+                goal_val = 68 if attack_dir == AttackDirection.LEFT_TO_RIGHT else 0
+                axis_name = "world_x"
+            else:
+                goal_val = 105 if attack_dir == AttackDirection.TOP_TO_BOTTOM else 0
+                axis_name = "world_y"
         for i, d in enumerate(sorted_defs):
-            pos_val = d[axis_name]
-            dist_to_goal = abs(pos_val - goal_val)
+            pos_val = d.get(axis_name, 0)
+            # Also show world coords for reference when using pixel fallback
+            extra_info = ""
+            if use_pixel_fallback:
+                extra_info = f" (world={d.get('world_x',0):.1f},{d.get('world_y',0):.1f})"
+            dist_to_goal = abs(pos_val - goal_val) if goal_val < 999999 else pos_val
             marker = ""
             if i == 0:
-                marker = " ← LAST (GK?)"
+                marker = " <- LAST (GK?)"
             elif i == 1:
-                marker = " ← SECOND-LAST → OFFSIDE LINE"
+                marker = " <- SECOND-LAST -> OFFSIDE LINE"
             print(f"    [{i}] id=#{d.get('track_id','?')} {d.get('class_name','?')} "
-                  f"team={d.get('team','?')} {axis_name}={pos_val:.1f} "
-                  f"dist_to_goal={dist_to_goal:.1f}{marker}")
+                  f"{axis_name}={pos_val:.1f}{extra_info} "
+                  f"dist={dist_to_goal:.1f}{marker}")
 
     def _check_offside_players(
         self,
