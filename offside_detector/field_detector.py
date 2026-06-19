@@ -729,34 +729,47 @@ class CenterCircleCalibrator(BaseCalibrator):
             is_horizontal_field = False
 
         if is_vertical and is_horizontal_field:
-            # ── HORIZONTAL FIELD ORIENTATION ──
-            # Field length runs left-right in image; vertical diameter in
-            # image = WIDTH direction (touchline-to-touchline), NOT length.
-            # Both clicked points are at world_y=52.5 (center line), with
-            # different world_x values.
-
-            # Determine which clicked point maps to which side of width.
-            # Upper point in image -> depends on camera angle, but we use
-            # consistent mapping: upper->left(x=cx-r), lower->right(x=cx+r).
-            # The attack_dir determines which direction "toward goal" means.
+            # ── HORIZONTAL FIELD: similarity transform from 2 points ──
+            # No virtual points needed. 2 point pairs → exactly 4 params.
+            # Similarity: wx=a*px-b*py+tx, wy=b*px+a*py+ty
+            cx, cy   = self.CENTER_X, self.CENTER_Y
+            r         = self.CENTER_CIRCLE_DIAMETER / 2.0
+            # p1→left(cx-r,cy), p2→right(cx+r,cy)
             if p1_py < p2_py:
-                # p1 is above p2 in image
-                world_pts = np.array([
-                    [cx - r, cy],         # 0: p1 (upper) → left on center line
-                    [cx + r, cy],         # 1: p2 (lower) → right on center line
-                    [cx + r, cy - vert],  # 2: virtual: right + toward goal (y-)
-                    [cx - r, cy + vert],  # 3: virtual: left  + away from goal (y+)
-                ], dtype=np.float32)
+                wx0, wy0 = cx - r, cy
+                wx1, wy1 = cx + r, cy
             else:
-                world_pts = np.array([
-                    [cx + r, cy],         # 0: p1 (lower) → right on center line
-                    [cx - r, cy],         # 1: p2 (upper) → left on center line
-                    [cx - r, cy - vert],  # 2: virtual: left  + toward goal (y-)
-                    [cx + r, cy + vert],  # 3: virtual: right + away from goal (y+)
-                ], dtype=np.float32)
-
-            print(f"[CenterCircle] HORIZONTAL FIELD mode (attack={attack_dir}): "
-                  f"vertical diameter → width axis (world_x)")
+                wx0, wy0 = cx + r, cy
+                wx1, wy1 = cx - r, cy
+            # Solve: 4 eq, 4 unknowns (a,b,tx,ty)
+            denom = dx*dx + dy*dy
+            if denom < 1e-6:
+                print("[CenterCircle] ERROR: points too close")
+                return FieldDetectionResult(is_reliable=False,
+                        calibration_mode="center_circle")
+            dwx = wx1 - wx0   # = 2r = 18.3
+            dwy = wy1 - wy0   # = 0
+            a   = (dx*dwx + dy*dwy) / denom
+            b   = (dx*dwy - dy*dwx) / denom
+            tx  = wx0 - a*p1_px + b*p1_py
+            ty  = wy0 - b*p1_px - a*p1_py
+            H   = np.array([[a, -b, tx],
+                               [b,  a, ty],
+                               [0., 0., 1.]], dtype=np.float32)
+            print(f"[CenterCircle] HORIZONTAL FIELD: similarity "
+                  f"(scale={np.sqrt(a*a+b*b):.3f}, "
+                  f"rot={np.arctan2(b,a)*180/np.pi:.1f}°)")
+            return FieldDetectionResult(
+                keypoints=np.array([(p1_px,p1_py),(p2_px,p2_py)],
+                                dtype=np.float32),
+                confidences=np.ones(2, dtype=np.float32),
+                homography=H,
+                inverse_homography=np.linalg.inv(H),
+                is_reliable=True,
+                calibration_mode="center_circle",
+                world_keypoints=np.array([[wx0,wy0],[wx1,wy1]],
+                                dtype=np.float32),
+            )
         elif is_vertical:
             # Diameter along y-axis (center line direction). Standard vertical field.
             if p1_py > p2_py:
