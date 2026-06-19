@@ -734,13 +734,13 @@ class CenterCircleCalibrator(BaseCalibrator):
             # Similarity: wx=a*px-b*py+tx, wy=b*px+a*py+ty
             cx, cy   = self.CENTER_X, self.CENTER_Y
             r         = self.CENTER_CIRCLE_DIAMETER / 2.0
-            # p1→left(cx-r,cy), p2→right(cx+r,cy)
-            if p1_py < p2_py:
-                wx0, wy0 = cx - r, cy
-                wx1, wy1 = cx + r, cy
+            # Diameter vertical in image -> world Y axis (center line)
+            if p1_px < p2_px:
+                wx0, wy0 = cx, cy - r
+                wx1, wy1 = cx, cy + r
             else:
-                wx0, wy0 = cx + r, cy
-                wx1, wy1 = cx - r, cy
+                wx0, wy0 = cx, cy + r
+                wx1, wy1 = cx, cy - r
             # Solve: 4 eq, 4 unknowns (a,b,tx,ty)
             denom = dx*dx + dy*dy
             if denom < 1e-6:
@@ -818,7 +818,7 @@ class CenterCircleCalibrator(BaseCalibrator):
             for i, (wx, wy) in enumerate(world_pts):
                 f.write(f"    [{i}] ({wx:.1f}, {wy:.1f})\n")
             f.write(f"  homography H (3x3):\n")
-            H = calib_result.homography_matrix
+            H = calib_result.homography
             for row in H:
                 f.write(f"    [{row[0]:+.6e}  {row[1]:+.6e}  {row[2]:+.6e}]\n")
             # Test: pixel->world->pixel roundtrip
