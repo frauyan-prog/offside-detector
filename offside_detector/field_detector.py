@@ -80,6 +80,7 @@ class FieldDetectionResult:
     # Metadata
     world_keypoints: Optional[np.ndarray] = None  # corresponding world coords
     field_orientation: int = 0  # 0=goal at y=0 is visible, 1=goal at y=105
+    attack_dir: Optional[str] = None  # attack direction (for center_circle mode)
     # Quality metrics (auto calibration only)
     mean_confidence: float = 0.0
     n_detected: int = 0
@@ -769,6 +770,7 @@ class CenterCircleCalibrator(BaseCalibrator):
                 calibration_mode="center_circle",
                 world_keypoints=np.array([[wx0,wy0],[wx1,wy1]],
                                 dtype=np.float32),
+                attack_dir=attack_dir_str if attack_dir else None,
             )
         elif is_vertical:
             # Diameter along y-axis (center line direction). Standard vertical field.
@@ -928,10 +930,11 @@ class ManualFieldCalibrator:
         """Load calibration from a JSON file."""
         with open(json_path, "r") as f:
             data = json.load(f)
-
+        
         pixel_pts = data.get("pixel_points", [])
         world_pts = data.get("world_points", None)
         mode = data.get("calibration_mode", "loaded")
+        attack_dir = data.get("attack_dir", None)  # NEW: load attack_dir for center_circle
 
         if len(pixel_pts) < 2:
             print(f"[Calibration] Need at least 2 pixel_points, got {len(pixel_pts)}")
@@ -942,7 +945,7 @@ class ManualFieldCalibrator:
         # Handle center_circle mode (2 points → synthesize 4)
         if mode == "center_circle" and len(pixel_pts) == 2:
             cc = CenterCircleCalibrator()
-            return cc._build_from_2_points(pixel_pts)
+            return cc._build_from_2_points(pixel_pts, attack_dir=attack_dir)
 
         if len(pixel_pts) < 4:
             print(f"[Calibration] Need at least 4 pixel_points for mode '{mode}', got {len(pixel_pts)}")
@@ -977,6 +980,7 @@ class ManualFieldCalibrator:
             "calibration_mode": result.calibration_mode,
             "is_reliable": result.is_reliable,
             "field_orientation": result.field_orientation,
+            "attack_dir": result.attack_dir,  # NEW: save attack_dir for center_circle mode
         }
         # Include quality metrics for auto calibration
         if result.calibration_mode == "auto":
