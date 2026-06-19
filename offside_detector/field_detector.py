@@ -721,7 +721,12 @@ class CenterCircleCalibrator(BaseCalibrator):
         is_vertical = abs(dy) > abs(dx)
 
         # Check if field is horizontally oriented (goals left-right)
-        is_horizontal_field = attack_dir in ("left_to_right", "right_to_left")
+        # attack_dir may be a string or AttackDirection enum
+        if attack_dir:
+            attack_dir_str = attack_dir.value if hasattr(attack_dir, 'value') else str(attack_dir)
+            is_horizontal_field = attack_dir_str in ("left_to_right", "right_to_left")
+        else:
+            is_horizontal_field = False
 
         if is_vertical and is_horizontal_field:
             # ── HORIZONTAL FIELD ORIENTATION ──
