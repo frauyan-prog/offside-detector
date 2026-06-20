@@ -457,6 +457,7 @@ class VideoProcessor:
         try:
             from .ellipse_calibrator import EllipseCalibrator
         except ImportError:
+            print(f"  [Recalib Frame {frame_idx}] EllipseCalibrator not importable")
             return False
 
         if self._field_result is None:
@@ -477,8 +478,10 @@ class VideoProcessor:
                 self.analyzer._total_frames_analyzed = 0
                 print(f"  [Recalib Ellipse Frame {frame_idx}] Homography updated")
                 return True
+            else:
+                print(f"  [Recalib Frame {frame_idx}] Ellipse not detected")
         except Exception as e:
-            pass
+            print(f"  [Recalib Frame {frame_idx}] Ellipse error: {e}")
 
         return False
 
