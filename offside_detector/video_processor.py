@@ -557,18 +557,13 @@ class VideoProcessor:
             print(f"  [Recalib Auto Frame {frame_idx}] Failed: {e}")
 
     def _recalibrate_from_vp(self, frame: np.ndarray, frame_idx: int):
-        """VP-based recalibration for center_circle and manual modes."""
+        """VP-based recalibration. Uses stored click points OR synthetic points from current H."""
         try:
             from .pitch_keypoint_detector import PitchKeypointDetector
         except ImportError:
             return
 
-        stored_kpts = self._field_result.keypoints
-        if stored_kpts is None or len(stored_kpts) < 2:
-            return
-
         try:
-            # Use STATIC methods (no model load) for line detection
             field_lines = PitchKeypointDetector.detect_field_lines(frame)
             if not field_lines or len(field_lines) < 2:
                 return
@@ -577,29 +572,76 @@ class VideoProcessor:
             if vp is None or vp_quality < 0.3:
                 return
 
-            from .field_detector import CenterCircleCalibrator
-            cc = CenterCircleCalibrator()
-            pixel_pts = [(float(stored_kpts[i][0]), float(stored_kpts[i][1]))
-                         for i in range(min(2, len(stored_kpts)))]
+            stored_kpts = self._field_result.keypoints
             attack_dir = self._field_result.attack_dir
 
-            vp_result = cc._build_from_vp(
-                frame, pixel_pts, attack_dir=attack_dir,
-                vp=vp, vp_quality=vp_quality, kp_detector=None
-            )
+            if stored_kpts is not None and len(stored_kpts) >= 2:
+                # Path A: Use stored click points + new VP
+                from .field_detector import CenterCircleCalibrator
+                cc = CenterCircleCalibrator()
+                pixel_pts = [(float(stored_kpts[i][0]), float(stored_kpts[i][1]))
+                             for i in range(min(2, len(stored_kpts)))]
+                vp_result = cc._build_from_vp(
+                    frame, pixel_pts, attack_dir=attack_dir,
+                    vp=vp, vp_quality=vp_quality, kp_detector=None
+                )
+                if vp_result is not None and vp_result.is_reliable:
+                    H_new = vp_result.homography
+                else:
+                    return
+            else:
+                # Path B: No stored points (ellipse mode). Use current H + VP constraint
+                H_new = self._vp_refine_current_h(vp, vp_quality)
+                if H_new is None:
+                    return
 
-            if vp_result is not None and vp_result.is_reliable:
-                self.transformer.set_homography(vp_result.homography)
-                if self.player_detector is not None:
-                    self.player_detector.set_field_homography(vp_result.homography)
-                self._field_result = vp_result
-                self.analyzer._direction_locked = False
-                self.analyzer._direction_votes = []
-                self.analyzer._total_frames_analyzed = 0
-                print(f"  [Recalib VP Frame {frame_idx}] VP=({vp[0]:.0f},{vp[1]:.0f}) "
-                      f"quality={vp_quality:.2f} n_lines={len(field_lines)}")
+            self.transformer.set_homography(H_new)
+            if self.player_detector is not None:
+                self.player_detector.set_field_homography(H_new)
+            if self._field_result is not None:
+                self._field_result.homography = H_new
+                self._field_result.inverse_homography = np.linalg.inv(H_new)
+            self.analyzer._direction_locked = False
+            self.analyzer._direction_votes = []
+            self.analyzer._total_frames_analyzed = 0
+            print(f"  [Recalib VP Frame {frame_idx}] VP=({vp[0]:.0f},{vp[1]:.0f}) "
+                  f"quality={vp_quality:.2f} n_lines={len(field_lines)}")
         except Exception as e:
             print(f"  [Recalib VP Frame {frame_idx}] Failed: {e}")
+
+    def _vp_refine_current_h(self, vp: np.ndarray, vp_quality: float) -> Optional[np.ndarray]:
+        """Refine current homography with VP constraint when no stored click points exist."""
+        H = self.transformer.homography
+        if H is None:
+            return None
+
+        try:
+            invH = np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            return None
+
+        vpx, vpy = float(vp[0]), float(vp[1])
+
+        # Generate virtual point pairs from current H at known world positions
+        src_pts = []
+        dst_pts = []
+
+        # Sample field corners + center + key positions
+        for wy in [0, 35, 52.5, 70, 105]:
+            for wx in [0, 17, 34, 51, 68]:
+                pt = np.array([[[wx, wy]]], dtype=np.float32)
+                pix = cv2.perspectiveTransform(pt, invH)[0, 0]
+                src_pts.append([float(pix[0]), float(pix[1])])
+                dst_pts.append([wx, wy])
+
+        if len(src_pts) < 4:
+            return None
+
+        src = np.array(src_pts, dtype=np.float32).reshape(-1, 1, 2)
+        dst = np.array(dst_pts, dtype=np.float32).reshape(-1, 1, 2)
+
+        H_new, _ = cv2.findHomography(src, dst, method=cv2.RANSAC, ransacReprojThreshold=3.0, maxIters=2000)
+        return H_new
 
     def _save_json_result(self, result: ProcessingResult, json_path: str):
         """Save processing results to JSON file."""
