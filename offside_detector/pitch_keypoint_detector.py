@@ -175,7 +175,16 @@ class PitchKeypointDetector:
         self.confidence = confidence
         self.image_size = image_size
 
-        logger.info(f"Loading pitch keypoint model: {model_path}")
+        self._device = "cpu"
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self._device = "cuda"
+                logger.info(f"GPU detected: {torch.cuda.get_device_name(0)}")
+        except ImportError:
+            pass
+
+        logger.info(f"Loading pitch keypoint model: {model_path} (device={self._device})")
         self.model = YOLO(model_path, task="pose")
         logger.info("Model loaded successfully (YOLOv8-pose, 32 keypoints)")
 
@@ -192,7 +201,7 @@ class PitchKeypointDetector:
             np.ndarray of shape (32, 3) with (x, y, confidence) pixel coordinates,
             or None if no keypoints detected.
         """
-        results = self.model(frame, imgsz=self.image_size, verbose=False)
+        results = self.model(frame, imgsz=self.image_size, verbose=False, device=self._device)
 
         if len(results) == 0 or results[0].keypoints is None:
             return None
@@ -688,8 +697,8 @@ class PitchKeypointDetector:
 
     # ── Field Line Detection & VP from image ─────────────────────────────────
 
+    @staticmethod
     def detect_field_lines(
-        self,
         frame: np.ndarray,
         canny_low: int = 30,
         canny_high: int = 90,
@@ -756,8 +765,8 @@ class PitchKeypointDetector:
 
         return filtered
 
+    @staticmethod
     def find_vp_from_lines(
-        self,
         lines: List[np.ndarray],
         ransac_threshold: float = 100.0,
         ransac_iters: int = 1000,
@@ -800,7 +809,7 @@ class PitchKeypointDetector:
 
         # If only 2 lines, just return their intersection
         if nc == 2:
-            vp = self._line_intersection_from_segments(
+            vp = PitchKeypointDetector._line_intersection_from_segments(
                 cluster_lines[0], cluster_lines[1],
             )
             if np.any(np.isnan(vp)):
@@ -811,7 +820,7 @@ class PitchKeypointDetector:
         intersections = []
         for i in range(nc):
             for j in range(i + 1, nc):
-                pt = self._line_intersection_from_segments(
+                pt = PitchKeypointDetector._line_intersection_from_segments(
                     cluster_lines[i], cluster_lines[j],
                 )
                 if not np.any(np.isnan(pt)):

@@ -54,3 +54,6 @@ desktop.ini
 # Nested repos / experiments
 pnlcalib_test/
 web/task_state/
+*.whl  
+debug_log.txt  
+nul 

@@ -95,7 +95,7 @@ class OffsideVisualizer:
     def _draw_offside_line(
         self, frame: np.ndarray, result: OffsideResult
     ) -> np.ndarray:
-        """Draw the offside reference line across the pitch."""
+        """Draw the offside reference line across the pitch using Homography projection."""
         if result.offside_line_pixels is None:
             return frame
 
@@ -120,14 +120,30 @@ class OffsideVisualizer:
                 [p1[0], p1[1]], [p2[0], p2[1]],
                 [w, h], [0, h]
             ], dtype=np.int32)
-        else:
+        elif result.attack_direction == AttackDirection.BOTTOM_TO_TOP:
+            # Offside zone is above the line
             pts = np.array([
                 [0, 0], [w, 0],
                 [p2[0], p2[1]], [p1[0], p1[1]]
             ], dtype=np.int32)
+        elif result.attack_direction == AttackDirection.LEFT_TO_RIGHT:
+            # Offside zone is to the right of the line
+            pts = np.array([
+                [p1[0], p1[1]], [p2[0], p2[1]],
+                [w, h], [w, 0]
+            ], dtype=np.int32)
+        elif result.attack_direction == AttackDirection.RIGHT_TO_LEFT:
+            # Offside zone is to the left of the line
+            pts = np.array([
+                [0, 0], [0, h],
+                [p2[0], p2[1]], [p1[0], p1[1]]
+            ], dtype=np.int32)
+        else:
+            pts = None
 
-        cv2.fillPoly(overlay, [pts], (0, 0, 200))
-        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
+        if pts is not None:
+            cv2.fillPoly(overlay, [pts], (0, 0, 200))
+            cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
 
         return frame
 

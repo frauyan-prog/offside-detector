@@ -644,7 +644,167 @@ class CenterCircleCalibrator(BaseCalibrator):
         if result is None:
             return None
 
+        # Try VP-constrained perspective homography first
+        try:
+            from .pitch_keypoint_detector import PitchKeypointDetector
+            kp_detector = PitchKeypointDetector()
+            field_lines = kp_detector.detect_field_lines(frame)
+            if field_lines and len(field_lines) >= 2:
+                vp, vp_quality = kp_detector.find_vp_from_lines(field_lines)
+                if vp is not None and vp_quality > 0.3:
+                    vp_result = self._build_from_vp(frame, result, attack_dir, vp, vp_quality, kp_detector)
+                    if vp_result is not None and vp_result.is_reliable:
+                        return vp_result
+                    print("[CenterCircle] VP homography failed, falling back to similarity")
+        except Exception as e:
+            print(f"[CenterCircle] VP detection failed: {e}, using similarity fallback")
+
         return self._build_from_2_points(result, attack_dir=attack_dir)
+
+    def _build_from_vp(self, frame: np.ndarray, pixel_points: List[Tuple[float, float]],
+                       attack_dir: str, vp: np.ndarray, vp_quality: float,
+                       kp_detector) -> Optional[FieldDetectionResult]:
+        """
+        Build a VP-constrained PERSPECTIVE homography from 2 click points + vanishing point.
+
+        The VP tells us where parallel field lines converge in the image. Combined with
+        the 2 known center-circle world points, this gives a proper perspective transform
+        (8 DOF) instead of the 4-DOF similarity transform.
+
+        World coordinate system (FIFA 68x105):
+          x = width (0..68), y = length (0..105)
+          Center = (34, 52.5), circle radius = 9.15m
+
+        Using the VP, we construct virtual "touchline" points and solve DLT.
+        """
+        import os
+        p1_px, p1_py = pixel_points[0]
+        p2_px, p2_py = pixel_points[1]
+
+        dx = p2_px - p1_px
+        dy = p2_py - p1_py
+        line_len = np.sqrt(dx * dx + dy * dy)
+        if line_len < 10:
+            return None
+
+        mid_px = (p1_px + p2_px) / 2.0
+        mid_py = (p1_py + p2_py) / 2.0
+        vpx, vpy = float(vp[0]), float(vp[1])
+
+        # Determine field orientation
+        is_vertical_circle = abs(dy) > abs(dx)
+        attack_dir_str = attack_dir.value if hasattr(attack_dir, 'value') else str(attack_dir)
+        is_horizontal_field = attack_dir_str in ("left_to_right", "right_to_left")
+
+        cx, cy = self.CENTER_X, self.CENTER_Y
+        r = self.CENTER_CIRCLE_DIAMETER / 2.0  # 9.15
+
+        if is_vertical_circle and is_horizontal_field:
+            if p1_px < p2_px:
+                wx0, wy0 = cx, cy - r
+                wx1, wy1 = cx, cy + r
+            else:
+                wx0, wy0 = cx, cy + r
+                wx1, wy1 = cx, cy - r
+        elif is_vertical_circle:
+            if p1_py > p2_py:
+                wx0, wy0 = cx, cy - r
+                wx1, wy1 = cx, cy + r
+            else:
+                wx0, wy0 = cx, cy + r
+                wx1, wy1 = cx, cy - r
+        else:
+            wx0, wy0 = cx - r, cy
+            wx1, wy1 = cx + r, cy
+
+        # Build DLT system with 2 real points + VP constraint
+        # VP constraint: h12 - vpx*h32 = 0, h22 - vpy*h32 = 0
+        A_rows = []
+        w_rows = []
+
+        # Real point 0
+        px, py = p1_px, p1_py
+        wx, wy = wx0, wy0
+        A_rows.append([0, 0, 0, -wx, -wy, -1,  py * wx,  py * wy,  py])
+        w_rows.append(1.0)
+        A_rows.append([wx, wy, 1,  0,   0,   0, -px * wx, -px * wy, -px])
+        w_rows.append(1.0)
+
+        # Real point 1
+        px, py = p2_px, p2_py
+        wx, wy = wx1, wy1
+        A_rows.append([0, 0, 0, -wx, -wy, -1,  py * wx,  py * wy,  py])
+        w_rows.append(1.0)
+        A_rows.append([wx, wy, 1,  0,   0,   0, -px * wx, -px * wy, -px])
+        w_rows.append(1.0)
+
+        # VP constraint (column 2 of H maps to VP)
+        vp_weight = max(5.0, 15.0 * vp_quality)
+        A_rows.append([0, 1, 0, 0, 0, 0, -vpx, 0, 0])
+        w_rows.append(vp_weight)
+        A_rows.append([0, 0, 0, 0, 1, 0, 0, -vpy, 0])
+        w_rows.append(vp_weight)
+
+        A = np.array(A_rows, dtype=np.float64)
+        wv = np.array(w_rows, dtype=np.float64)
+        Aw = A * wv[:, np.newaxis]
+
+        _, _, Vt = np.linalg.svd(Aw, full_matrices=False)
+        h = Vt[-1, :]
+        H = h.reshape(3, 3).astype(np.float64)
+        if abs(H[2, 2]) > 1e-10:
+            H /= H[2, 2]
+
+        H = H.astype(np.float32)
+
+        # Validate: check that the 2 clicked points map correctly
+        test_pt0 = np.array([[[p1_px, p1_py]]], dtype=np.float32)
+        test_w0 = cv2.perspectiveTransform(test_pt0, H)[0, 0]
+        test_pt1 = np.array([[[p2_px, p2_py]]], dtype=np.float32)
+        test_w1 = cv2.perspectiveTransform(test_pt1, H)[0, 0]
+        err0 = np.linalg.norm(test_w0 - np.array([wx0, wy0]))
+        err1 = np.linalg.norm(test_w1 - np.array([wx1, wy1]))
+
+        # Log
+        log_path = os.path.join(os.path.dirname(__file__), "..", "output", "debug_log.txt")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n{'='*60}\n")
+            f.write(f"[CALIB] VP-CONSTRAINED PERSPECTIVE HOMOGRAPHY\n")
+            f.write(f"  VP=({vpx:.1f},{vpy:.1f}) quality={vp_quality:.2f}\n")
+            f.write(f"  p1=({p1_px:.1f},{p1_py:.1f}) -> world=({wx0:.1f},{wy0:.1f}) err={err0:.2f}m\n")
+            f.write(f"  p2=({p2_px:.1f},{p2_py:.1f}) -> world=({wx1:.1f},{wy1:.1f}) err={err1:.2f}m\n")
+            f.write(f"  H =\n")
+            for row in H:
+                f.write(f"    [{row[0]:+.6e}  {row[1]:+.6e}  {row[2]:+.6e}]\n")
+
+        if err0 > 5.0 or err1 > 5.0:
+            print(f"[CenterCircle] VP homography validation FAILED: err0={err0:.1f}m err1={err1:.1f}m")
+            return None
+
+        rot_angle = np.arctan2(H[1, 0], H[0, 0]) * 180 / np.pi
+        scale_x = np.sqrt(H[0, 0]**2 + H[1, 0]**2)
+
+        n_lines = "?"
+        if kp_detector is not None:
+            try:
+                n_lines = len(kp_detector.detect_field_lines(frame))
+            except Exception:
+                pass
+        print(f"[CenterCircle] VP PERSPECTIVE: "
+              f"VP=({vpx:.0f},{vpy:.0f}) n_lines={n_lines} "
+              f"err=({err0:.1f},{err1:.1f})m scale={scale_x:.3f} rot={rot_angle:.1f}°")
+
+        return FieldDetectionResult(
+            keypoints=np.array([(p1_px, p1_py), (p2_px, p2_py)], dtype=np.float32),
+            confidences=np.ones(2, dtype=np.float32),
+            homography=H,
+            inverse_homography=np.linalg.inv(H),
+            is_reliable=True,
+            calibration_mode="center_circle_vp",
+            world_keypoints=np.array([[wx0, wy0], [wx1, wy1]], dtype=np.float32),
+            attack_dir=attack_dir_str if attack_dir else None,
+        )
 
     def _build_from_2_points(
         self, pixel_points: List[Tuple[float, float]],

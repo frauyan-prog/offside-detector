@@ -47,7 +47,7 @@ class ProcessingConfig:
     """Configuration for video processing."""
     # Sampling
     process_every_n_frames: int = 1           # Process every N frames
-    field_detect_every_n_frames: int = 30     # Re-detect field every N frames (auto mode only)
+    field_detect_every_n_frames: int = 10     # Re-detect field every N frames (handles camera movement)
     skip_frames_start: int = 0                # Skip first N frames
     max_frames: Optional[int] = None          # Process at most N frames
 
@@ -125,6 +125,9 @@ class VideoProcessor:
         self.calibrator = ManualFieldCalibrator()
         self._field_result: Optional[FieldDetectionResult] = None
         self._last_valid_field: Optional[FieldDetectionResult] = None
+
+        # Cached YOLO-pose detector for auto mode recalibration (lazy load, once)
+        self._auto_kp_detector = None
 
     def process(
         self,
@@ -261,6 +264,12 @@ class VideoProcessor:
                 scale = config.resize_width / frame.shape[1]
                 new_h = int(frame.shape[0] * scale)
                 frame = cv2.resize(frame, (config.resize_width, new_h))
+
+            # --- Step 0: Auto-recalibrate Homography periodically (handles camera movement) ---
+            if (config.field_detect_every_n_frames > 0
+                    and processed_count > 0
+                    and processed_count % config.field_detect_every_n_frames == 0):
+                self._recalibrate_from_current_frame(frame, frame_idx)
 
             # --- Step 1: Player Detection & Tracking ---
             frame_det = self.player_detector.detect_and_track(
@@ -420,6 +429,143 @@ class VideoProcessor:
         self._last_valid_field = result
         if result.homography is not None:
             self.transformer.set_homography(result.homography)
+
+    def _recalibrate_from_current_frame(self, frame: np.ndarray, frame_idx: int):
+        """
+        Automatically re-detect the field and update Homography.
+
+        Two strategies based on calibration mode:
+        - center_circle / interactive: Use VP from field lines + stored click points (fast, pure CV)
+        - auto: Use cached YOLO-pose 32-keypoint detector for full independent recalibration
+        """
+        if self._field_result is None:
+            return
+
+        calib_mode = self._field_result.calibration_mode
+
+        # ── Strategy A: Auto mode → YOLO-pose keypoint re-detection ──
+        if calib_mode == "auto":
+            self._recalibrate_auto(frame, frame_idx)
+            return
+
+        # ── Strategy B: Center-circle / manual modes → VP from field lines ──
+        self._recalibrate_from_vp(frame, frame_idx)
+
+    def _recalibrate_auto(self, frame: np.ndarray, frame_idx: int):
+        """Re-detect 32 keypoints using cached YOLO-pose model, compute new Homography."""
+        try:
+            from .pitch_keypoint_detector import PitchKeypointDetector
+        except ImportError:
+            return
+
+        # Lazy-load the YOLO-pose detector (once per video)
+        if self._auto_kp_detector is None:
+            try:
+                self._auto_kp_detector = PitchKeypointDetector()
+                print(f"  [Recalib Auto] YOLO-pose detector loaded (1-time init)")
+            except Exception as e:
+                print(f"  [Recalib Auto] Failed to load detector: {e}")
+                return
+
+        try:
+            # Detect 32 keypoints on current frame
+            pixel_kpts = self._auto_kp_detector.detect(frame)
+            if pixel_kpts is None:
+                return
+
+            n_detected = int(np.sum(pixel_kpts[:, 2] > 0.0))
+            if n_detected < 4:
+                return
+
+            # Compute homography with multi-subset voter
+            from .field_detector import FieldDetectionResult
+            H, voter_mask, voter_metrics = self._auto_kp_detector.voter_homography(
+                pixel_kpts, min_confidence=0.2, ransac_threshold=10.0
+            )
+
+            if H is None:
+                return
+
+            # Convert Roboflow → FIFA
+            from .pitch_keypoint_detector import _CONV_ROBOFLOW_TO_FIFA
+            H_fifa = _CONV_ROBOFLOW_TO_FIFA @ H
+
+            # Validate
+            valid, detail = self._auto_kp_detector.validate_homography(H_fifa)
+            if not valid and detail.get("goal_line_angle_deg", 999) > 10.0:
+                return
+
+            result = FieldDetectionResult(
+                keypoints=pixel_kpts[:, :2],
+                confidences=pixel_kpts[:, 2],
+                homography=H_fifa,
+                inverse_homography=np.linalg.inv(H_fifa),
+                is_reliable=True,
+                num_valid_keypoints=n_detected,
+                calibration_mode="auto",
+                world_keypoints=self._auto_kp_detector.get_world_keypoints()[:, :2],
+                mean_confidence=float(np.mean(pixel_kpts[:, 2])),
+                voter_rmse=voter_metrics.get("rmse", 0.0),
+                subset=voter_metrics.get("subset_name", "voter"),
+            )
+
+            self.transformer.set_homography(H_fifa)
+            if self.player_detector is not None:
+                self.player_detector.set_field_homography(H_fifa)
+            self._field_result = result
+            self.analyzer._direction_locked = False
+            self.analyzer._direction_votes = []
+            self.analyzer._total_frames_analyzed = 0
+            print(f"  [Recalib Auto Frame {frame_idx}] {n_detected}/32 kpts "
+                  f"RMSE={voter_metrics.get('rmse', 0):.1f}m "
+                  f"subset={voter_metrics.get('subset_name', '?')}")
+        except Exception as e:
+            print(f"  [Recalib Auto Frame {frame_idx}] Failed: {e}")
+
+    def _recalibrate_from_vp(self, frame: np.ndarray, frame_idx: int):
+        """VP-based recalibration for center_circle and manual modes."""
+        try:
+            from .pitch_keypoint_detector import PitchKeypointDetector
+        except ImportError:
+            return
+
+        stored_kpts = self._field_result.keypoints
+        if stored_kpts is None or len(stored_kpts) < 2:
+            return
+
+        try:
+            # Use STATIC methods (no model load) for line detection
+            field_lines = PitchKeypointDetector.detect_field_lines(frame)
+            if not field_lines or len(field_lines) < 2:
+                return
+
+            vp, vp_quality = PitchKeypointDetector.find_vp_from_lines(field_lines)
+            if vp is None or vp_quality < 0.3:
+                return
+
+            from .field_detector import CenterCircleCalibrator
+            cc = CenterCircleCalibrator()
+            pixel_pts = [(float(stored_kpts[i][0]), float(stored_kpts[i][1]))
+                         for i in range(min(2, len(stored_kpts)))]
+            attack_dir = self._field_result.attack_dir
+
+            vp_result = cc._build_from_vp(
+                frame, pixel_pts, attack_dir=attack_dir,
+                vp=vp, vp_quality=vp_quality, kp_detector=None
+            )
+
+            if vp_result is not None and vp_result.is_reliable:
+                self.transformer.set_homography(vp_result.homography)
+                if self.player_detector is not None:
+                    self.player_detector.set_field_homography(vp_result.homography)
+                self._field_result = vp_result
+                self.analyzer._direction_locked = False
+                self.analyzer._direction_votes = []
+                self.analyzer._total_frames_analyzed = 0
+                print(f"  [Recalib VP Frame {frame_idx}] VP=({vp[0]:.0f},{vp[1]:.0f}) "
+                      f"quality={vp_quality:.2f} n_lines={len(field_lines)}")
+        except Exception as e:
+            print(f"  [Recalib VP Frame {frame_idx}] Failed: {e}")
 
     def _save_json_result(self, result: ProcessingResult, json_path: str):
         """Save processing results to JSON file."""
