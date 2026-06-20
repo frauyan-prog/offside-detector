@@ -633,7 +633,36 @@ class CenterCircleCalibrator(BaseCalibrator):
     ]
 
     def calibrate(self, frame: np.ndarray, attack_dir: str = None) -> Optional[FieldDetectionResult]:
-        """Run 2-point center circle calibration."""
+        """
+        Run center circle calibration. Strategies in priority order:
+          1. Ellipse auto-detection + VP refinement (zero clicks, most accurate)
+          2. Manual 2-point click + VP perspective homography
+          3. Manual 2-point click + similarity transform (fallback)
+        """
+        # ── Strategy 1: Auto-detect ellipse ──
+        try:
+            from .ellipse_calibrator import EllipseCalibrator
+            ec = EllipseCalibrator()
+            H_ellipse = ec.calibrate_with_vp(frame, attack_dir=attack_dir)
+            if H_ellipse is not None:
+                attack_dir_str = attack_dir.value if hasattr(attack_dir, 'value') else str(attack_dir) if attack_dir else None
+                print(f"[CenterCircle] ELLIPSE AUTO-CALIBRATION successful!")
+                return FieldDetectionResult(
+                    keypoints=np.zeros((0, 2), dtype=np.float32),
+                    confidences=np.ones(0, dtype=np.float32),
+                    homography=H_ellipse,
+                    inverse_homography=np.linalg.inv(H_ellipse),
+                    is_reliable=True,
+                    calibration_mode="ellipse",
+                    attack_dir=attack_dir_str,
+                )
+            print("[CenterCircle] Ellipse detection failed, falling back to manual...")
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"[CenterCircle] Ellipse detection error: {e}")
+
+        # ── Strategy 2: Manual 2-point click ──
         result = self._run_ui(
             frame,
             title=self.TITLE,
