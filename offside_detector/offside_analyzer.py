@@ -523,19 +523,17 @@ class OffsideAnalyzer:
 
         if _is_horizontal_attack(attack_dir):
             if use_pixel_fallback:
-                # Fallback: use pixel_x position directly
-                # For left_to_right attack, goal is on the RIGHT side of image
-                # → defender closest to goal = highest pixel_x
                 if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                    sorted_defs = sorted(defenders, key=lambda p: -p.get("pixel_x", 0))
-                else:
+                    # Defending goal at x=0. Last defender = smallest pixel_x.
+                    # Sort ASCENDING: [last_def, 2nd_last, ..., farthest_from_goal]
                     sorted_defs = sorted(defenders, key=lambda p: p.get("pixel_x", 0))
+                else:  # RIGHT_TO_LEFT: defending goal at x=68
+                    sorted_defs = sorted(defenders, key=lambda p: -p.get("pixel_x", 0))
             else:
-                # Normal: use world_x
                 if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                    sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
-                else:
                     sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
+                else:  # RIGHT_TO_LEFT
+                    sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
         else:
             # Vertical attack: field length along world Y axis
             if use_pixel_fallback:
