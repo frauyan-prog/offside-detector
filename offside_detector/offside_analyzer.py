@@ -260,10 +260,10 @@ class OffsideAnalyzer:
                 sorted_teams = sorted(avgs.items(), key=lambda x: x[1])
                 defending_avg_x = avgs[sorted_teams[0][0]]
 
-                if defending_avg_x < midpoint:
-                    vote = "left_to_right"   # defenders near x=0, attack toward x=68
+                if defending_avg_x > midpoint:
+                    vote = "left_to_right"   # defenders near x=68 (their own goal), attack from left
                 else:
-                    vote = "right_to_left"   # defenders near x=68, attack toward x=0
+                    vote = "right_to_left"   # defenders near x=0 (their own goal), attack from right
             else:
                 # Single team: use world_x average vs midpoint
                 avg_x = float(np.mean(all_wx))
@@ -416,10 +416,12 @@ class OffsideAnalyzer:
 
             # For LEFT_TO_RIGHT: defenders should be at small world_x (near x=0),
             # attackers at large world_x (near x=68)
+            # For LEFT_TO_RIGHT: defenders protect right goal (x=68), so defenders
+            # are at LARGE world_x. Attackers push from left (small world_x).
             if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                correct_team = "attacking" if world_x > midpoint else "defending"
-            else:  # RIGHT_TO_LEFT
-                correct_team = "attacking" if world_x < midpoint else "defending"
+                correct_team = "defending" if world_x > midpoint else "attacking"
+            else:  # RIGHT_TO_LEFT: defenders protect left goal (x=0)
+                correct_team = "defending" if world_x < midpoint else "attacking"
 
             if team != correct_team:
                 p["team"] = correct_team
@@ -524,16 +526,16 @@ class OffsideAnalyzer:
         if _is_horizontal_attack(attack_dir):
             if use_pixel_fallback:
                 if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                    # Defending goal at x=0. Last defender = smallest pixel_x.
-                    # Sort ASCENDING: [last_def, 2nd_last, ..., farthest_from_goal]
-                    sorted_defs = sorted(defenders, key=lambda p: p.get("pixel_x", 0))
-                else:  # RIGHT_TO_LEFT: defending goal at x=68
+                    # Defending goal at x=68. Last defender = highest pixel_x.
+                    # Sort DESCENDING: [last_def, 2nd_last, ..., farthest_from_goal]
                     sorted_defs = sorted(defenders, key=lambda p: -p.get("pixel_x", 0))
+                else:  # RIGHT_TO_LEFT: defending goal at x=0
+                    sorted_defs = sorted(defenders, key=lambda p: p.get("pixel_x", 0))
             else:
                 if attack_dir == AttackDirection.LEFT_TO_RIGHT:
-                    sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
-                else:  # RIGHT_TO_LEFT
                     sorted_defs = sorted(defenders, key=lambda p: -p["world_x"])
+                else:  # RIGHT_TO_LEFT
+                    sorted_defs = sorted(defenders, key=lambda p: p["world_x"])
         else:
             # Vertical attack: field length along world Y axis
             if use_pixel_fallback:
