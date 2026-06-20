@@ -434,8 +434,8 @@ class VideoProcessor:
         """
         Automatically re-detect the field and update Homography.
 
-        Two strategies based on calibration mode:
-        - center_circle / interactive: Use VP from field lines + stored click points (fast, pure CV)
+        Multiple strategies tried in priority order:
+        - ellipse / center_circle: Try ellipse detection first, then VP from field lines
         - auto: Use cached YOLO-pose 32-keypoint detector for full independent recalibration
         """
         if self._field_result is None:
@@ -448,8 +448,39 @@ class VideoProcessor:
             self._recalibrate_auto(frame, frame_idx)
             return
 
-        # ── Strategy B: Center-circle / manual modes → VP from field lines ──
-        self._recalibrate_from_vp(frame, frame_idx)
+        # ── Strategy B: Ellipse / center-circle / manual → try ellipse first, then VP ──
+        if not self._recalibrate_from_ellipse(frame, frame_idx):
+            self._recalibrate_from_vp(frame, frame_idx)
+
+    def _recalibrate_from_ellipse(self, frame: np.ndarray, frame_idx: int) -> bool:
+        """Try ellipse-based recalibration. Returns True on success."""
+        try:
+            from .ellipse_calibrator import EllipseCalibrator
+        except ImportError:
+            return False
+
+        if self._field_result is None:
+            return False
+
+        try:
+            attack_dir = self._field_result.attack_dir
+            ec = EllipseCalibrator()
+            H = ec.calibrate_with_vp(frame, attack_dir=attack_dir)
+            if H is not None:
+                self.transformer.set_homography(H)
+                if self.player_detector is not None:
+                    self.player_detector.set_field_homography(H)
+                self._field_result.homography = H
+                self._field_result.inverse_homography = np.linalg.inv(H)
+                self.analyzer._direction_locked = False
+                self.analyzer._direction_votes = []
+                self.analyzer._total_frames_analyzed = 0
+                print(f"  [Recalib Ellipse Frame {frame_idx}] Homography updated")
+                return True
+        except Exception as e:
+            pass
+
+        return False
 
     def _recalibrate_auto(self, frame: np.ndarray, frame_idx: int):
         """Re-detect 32 keypoints using cached YOLO-pose model, compute new Homography."""
