@@ -113,7 +113,12 @@ class OffsideAnalyzer:
         if attack_dir == AttackDirection.UNKNOWN:
             return result
 
-        # Step 3: Group by team
+        # Step 3: Fix team assignments for horizontal fields
+        # K-means uses y-position (vertical assumption), swap if horizontal
+        if _is_horizontal_attack(attack_dir):
+            self._fix_horizontal_teams(field_players, attack_dir)
+
+        # Step 4: Group by team
         attackers, defenders = self._separate_teams(field_players, attack_dir)
 
         # ── DEBUG: frame summary ──
@@ -390,6 +395,40 @@ class OffsideAnalyzer:
                 })
 
         return players
+
+    def _fix_horizontal_teams(self, field_players: List[Dict], attack_dir: AttackDirection):
+        """
+        K-means jersey classifier assumes vertical field (uses y-position to
+        assign attacking/defending). For horizontal fields, we swap teams
+        based on player's world_x position relative to the midfield.
+
+        This corrects misclassifications like white-jersey defenders being
+        labeled as "attacking" because they're higher up in the image (y-axis)
+        but are actually on the defending side of a horizontal field (x-axis).
+        """
+        swapped = 0
+        for p in field_players:
+            team = p.get("team", "unknown")
+            if team not in ("attacking", "defending"):
+                continue
+            world_x = p.get("world_x", 34.0)
+            midpoint = self.field_width / 2.0  # 34.0
+
+            # For LEFT_TO_RIGHT: defenders should be at small world_x (near x=0),
+            # attackers at large world_x (near x=68)
+            if attack_dir == AttackDirection.LEFT_TO_RIGHT:
+                correct_team = "attacking" if world_x > midpoint else "defending"
+            else:  # RIGHT_TO_LEFT
+                correct_team = "attacking" if world_x < midpoint else "defending"
+
+            if team != correct_team:
+                p["team"] = correct_team
+                swapped += 1
+
+        if swapped > 0:
+            self._debug_log(f"[TeamFix] Horizontal field: swapped {swapped} players")
+            print(f"  [TeamFix] Horizontal field ({attack_dir.value}): "
+                  f"swapped {swapped}/{len(field_players)} player teams")
 
     def _separate_teams(
         self, players: List[Dict], attack_dir: AttackDirection
