@@ -760,7 +760,8 @@ class PitchKeypointDetector:
                 angle_deg = abs(np.degrees(np.arctan2(dy, dx)))
             # Accept wider angle range — field lines can be at various
             # apparent angles depending on camera position
-            if 10 < angle_deg < 70:
+            # Accept wider angle range for better line detection
+            if 5 < angle_deg < 85:
                 filtered.append(np.array([x1, y1, x2, y2], dtype=np.float64))
 
         return filtered
