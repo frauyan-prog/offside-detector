@@ -42,6 +42,55 @@ class _NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
+def _goal_line_angle_deg(H: Optional[np.ndarray]) -> float:
+    """
+    Compute the goal-line parallelism angle (deg) for a homography in FIFA coords.
+
+    Uses the same projection as PitchKeypointDetector.validate_homography,
+    but standalone so it can be applied to ANY calibration mode without
+    loading the YOLO-pose model.
+    """
+    if H is None:
+        return 999.0
+    try:
+        invH = np.linalg.inv(H)
+        corners = np.array([[[0.0, 0.0]], [[68.0, 0.0]],
+                             [[68.0, 105.0]], [[0.0, 105.0]]], dtype=np.float32)
+        pix = cv2.perspectiveTransform(corners, invH)
+        tl, tr, br, bl = pix[0, 0], pix[1, 0], pix[2, 0], pix[3, 0]
+        v_top = tr - tl
+        v_bot = br - bl
+        ang_top = np.arctan2(v_top[1], v_top[0]) * 180 / np.pi
+        ang_bot = np.arctan2(v_bot[1], v_bot[0]) * 180 / np.pi
+        return abs(ang_top - ang_bot)
+    except Exception:
+        return 999.0
+
+
+def _homography_is_convex(H: Optional[np.ndarray]) -> bool:
+    """Check whether the projected FIFA pitch corners form a convex quad."""
+    if H is None:
+        return False
+    try:
+        invH = np.linalg.inv(H)
+        corners = np.array([[[0.0, 0.0]], [[68.0, 0.0]],
+                             [[68.0, 105.0]], [[0.0, 105.0]]], dtype=np.float32)
+        pix = cv2.perspectiveTransform(corners, invH)
+        quad = np.array([pix[0, 0], pix[1, 0], pix[2, 0], pix[3, 0]], dtype=np.float32)
+        # Cross-product sign test (same as PitchKeypointDetector._is_convex_quad)
+        signs = []
+        for i in range(4):
+            p0, p1, p2 = quad[i], quad[(i + 1) % 4], quad[(i + 2) % 4]
+            cross = (p1[0] - p0[0]) * (p2[1] - p1[1]) - (p1[1] - p0[1]) * (p2[0] - p1[0])
+            signs.append(1 if cross > 1e-6 else (-1 if cross < -1e-6 else 0))
+        first = next((s for s in signs if s != 0), 0)
+        if first == 0:
+            return False
+        return all(s == 0 or s == first for s in signs)
+    except Exception:
+        return False
+
+
 @dataclass
 class ProcessingConfig:
     """Configuration for video processing."""
@@ -468,6 +517,22 @@ class VideoProcessor:
             ec = EllipseCalibrator()
             H = ec.calibrate_with_vp(frame, attack_dir=attack_dir)
             if H is not None:
+                # Quality gate: only accept an H that keeps the goal lines parallel.
+                # (Fixes offside-line drift on camera pans when ellipse/VP detect fails.)
+                new_angle = _goal_line_angle_deg(H)
+                convex = _homography_is_convex(H)
+                ANGLE_TOL = 3.0
+                cur_angle = _goal_line_angle_deg(self.transformer.homography)
+                cur_convex = _homography_is_convex(self.transformer.homography)
+
+                accept = (convex and new_angle <= ANGLE_TOL) or \
+                         (not cur_convex and new_angle < cur_angle)
+                if not accept:
+                    print(f"  [Recalib Ellipse Frame {frame_idx}] REJECT H "
+                          f"(angle={new_angle:.1f}° convex={convex}, "
+                          f"cur_angle={cur_angle:.1f}°)")
+                    return False
+
                 self.transformer.set_homography(H)
                 if self.player_detector is not None:
                     self.player_detector.set_field_homography(H)
@@ -476,7 +541,8 @@ class VideoProcessor:
                 self.analyzer._direction_locked = False
                 self.analyzer._direction_votes = []
                 self.analyzer._total_frames_analyzed = 0
-                print(f"  [Recalib Ellipse Frame {frame_idx}] Homography updated")
+                print(f"  [Recalib Ellipse Frame {frame_idx}] ACCEPT H "
+                      f"(angle={new_angle:.1f}°)")
                 return True
             else:
                 print(f"  [Recalib Frame {frame_idx}] Ellipse not detected")
@@ -505,11 +571,11 @@ class VideoProcessor:
             # Detect 32 keypoints on current frame
             pixel_kpts = self._auto_kp_detector.detect(frame)
             if pixel_kpts is None:
-                return
+                return False
 
             n_detected = int(np.sum(pixel_kpts[:, 2] > 0.0))
             if n_detected < 4:
-                return
+                return False
 
             # Compute homography with multi-subset voter
             from .field_detector import FieldDetectionResult
@@ -524,9 +590,27 @@ class VideoProcessor:
             from .pitch_keypoint_detector import _CONV_ROBOFLOW_TO_FIFA
             H_fifa = _CONV_ROBOFLOW_TO_FIFA @ H
 
-            # Validate
+            # Validate: only accept a homography whose goal line stays parallel.
+            # (Fix: old `if not valid and angle>10` wrongly accepted tilted H's,
+            #  which is exactly why the offside line drifted on camera pans.)
             valid, detail = self._auto_kp_detector.validate_homography(H_fifa)
-            if not valid and detail.get("goal_line_angle_deg", 999) > 10.0:
+            new_angle = detail.get("goal_line_angle_deg", 999.0)
+            ANGLE_TOL = 3.0  # max goal-line tilt (deg); goal lines are parallel in reality
+
+            # Frame-to-frame continuity guard: never jump to a worse H.
+            cur_angle = 999.0
+            cur_valid = False
+            if self.transformer.homography is not None:
+                cur_valid, _cd = self._auto_kp_detector.validate_homography(
+                    self.transformer.homography)
+                cur_angle = _cd.get("goal_line_angle_deg", 999.0)
+
+            accept = (valid and new_angle <= ANGLE_TOL) \
+                     or (not cur_valid and new_angle < cur_angle)
+            if not accept:
+                print(f"  [Recalib Auto Frame {frame_idx}] REJECT H "
+                      f"(valid={valid}, angle={new_angle:.1f}°, "
+                      f"cur_angle={cur_angle:.1f}°)")
                 return
 
             result = FieldDetectionResult(
@@ -594,6 +678,21 @@ class VideoProcessor:
                 H_new = self._vp_refine_current_h(vp, vp_quality)
                 if H_new is None:
                     return
+
+            # Quality gate: only accept an H that keeps the goal lines parallel.
+            new_angle = _goal_line_angle_deg(H_new)
+            convex = _homography_is_convex(H_new)
+            ANGLE_TOL = 3.0
+            cur_angle = _goal_line_angle_deg(self.transformer.homography)
+            cur_convex = _homography_is_convex(self.transformer.homography)
+
+            accept = (convex and new_angle <= ANGLE_TOL) or \
+                     (not cur_convex and new_angle < cur_angle)
+            if not accept:
+                print(f"  [Recalib VP Frame {frame_idx}] REJECT H "
+                      f"(angle={new_angle:.1f}° convex={convex}, "
+                      f"cur_angle={cur_angle:.1f}°)")
+                return
 
             self.transformer.set_homography(H_new)
             if self.player_detector is not None:

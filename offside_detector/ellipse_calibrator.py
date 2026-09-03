@@ -72,6 +72,9 @@ class EllipseCalibrator:
 
         # Find white/bright regions within the field
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Use CLAHE for contrast enhancement (helps with uneven broadcast lighting)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_eq = clahe.apply(gray)
         _, white_mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
 
         # Combine: white AND on-field

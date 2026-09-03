@@ -589,23 +589,37 @@ class GenericRectangleCalibrator(BaseCalibrator):
 
 class CenterCircleCalibrator(BaseCalibrator):
     """
-    Calibrate using only 2 points on the center circle's horizontal diameter.
+    Calibrate from 2 points on the center circle's diameter.
 
-    Works for: midfield shots where only the center circle is visible.
-    System synthesizes 2 additional virtual points (above and below the
-    clicked line) to create a 4-point homography.
+    WHICH DIAMETER TO CLICK
+    -----------------------
+    Click the diameter that runs along the field LENGTH (depth direction),
+    i.e. one endpoint NEAR the camera and the other FAR from it.
 
-    Click order (2 points):
-      Point 1: LEFT endpoint of center circle's horizontal diameter
-      Point 2: RIGHT endpoint of center circle's horizontal diameter
+    This matters: offside is judged along the depth axis, so a diameter
+    spanning near->far constrains the depth scale directly. Clicking the
+    left->right (width) diameter still works, but leaves the depth scale to
+    be inferred from synthesised virtual points, which is less reliable.
 
-    World coordinates (center of field at (34, 52.5)):
-      Point 1: (25.85, 52.5)   — left  of center (34 - 18.3/2)
-      Point 2: (43.15, 52.5)   — right of center (34 + 18.3/2)
+    CLICK ORDER DOES NOT MATTER
+    ---------------------------
+    The code decides which endpoint is near/far from the image Y coordinate:
+      _build_from_2_points: `if p1_py > p2_py` -> p1 is the near point
+      _build_from_vp:       same test
+    Clicking them in reverse order is therefore harmless.
 
-    Virtual points added automatically:
-      Point 3: (25.85, 42.5)   — same x, -10m in y
-      Point 4: (43.15, 62.5)   — same x, +10m in y
+    WORLD COORDINATES  (FIFA 68x105, centre (34, 52.5), radius r = 9.15)
+    --------------------------------------------------------------------
+    Vertical field (top_to_bottom / bottom_to_top), diameter drawn vertical:
+        NEAR point (lower on screen) -> (34, 52.5 - 9.15) = (34, 43.35)
+        FAR  point (upper on screen) -> (34, 52.5 + 9.15) = (34, 61.65)
+    Horizontal field (left_to_right / right_to_left), diameter drawn vertical:
+        resolved by comparing p1_px vs p2_px instead
+    Diameter drawn horizontal (width direction):
+        -> (34 - 9.15, 52.5) and (34 + 9.15, 52.5)
+
+    "NEAR / FAR" is relative to the CAMERA. It has nothing to do with
+    which team is attacking or defending.
     """
 
     MODE = CalibrationMode.CENTER_CIRCLE
@@ -613,23 +627,34 @@ class CenterCircleCalibrator(BaseCalibrator):
     CENTER_X = 34.0                # center of field
     CENTER_Y = 52.5                # halfway line
 
-    TITLE = "中圈标定 — 点击中圈直径两端（仅需2点）"
+    # TITLE and CLICK_LABELS are drawn onto the OpenCV window via cv2.putText,
+    # which CANNOT render CJK characters (they come out as ???). Keep them
+    # ASCII; the Chinese explanation lives in INSTRUCTIONS, which is printed
+    # to the terminal only.
+    TITLE = "Center Circle Calibration - Click NEAR then FAR point"
 
     INSTRUCTIONS = [
-        "您的画面只显示中圈区域，请点击中圈水平直径的两个端点：",
+        "【中圈标定】点击中圈直径的两端 —— 一近一远（沿球场纵深方向）",
         "",
-        "  ① 左端点  — 中圈水平直径的左侧端点",
-        "  ② 右端点  — 中圈水平直径的右侧端点",
+        "  ① 近点 —— 中圈上离摄像机较近的端点（画面中位置较低的那一点）",
+        "  ② 远点 —— 中圈上离摄像机较远的端点（画面中位置较高的那一点）",
         "",
-        "提示：点击中圈白线的最左端和最右端。",
-        "      系统会自动根据 FIFA 标准尺寸补全其余参考点。",
+        "为什么点「近 / 远」而不是「左 / 右」：",
+        "  · 越位是沿球场纵深方向判定的，沿纵深点两个点能直接约束纵深尺度",
+        "  · 点成左右方向也能跑通，但纵深尺度要靠合成的虚拟点推算，精度更差",
+        "  · 「近 / 远」是相对摄像机而言，与进攻方、防守方无关",
         "",
-        "中圈直径 = 18.3米（半径9.15米），位于球场正中心。",
+        "其他要点：",
+        "  · 点击顺序无所谓 —— 系统按画面上下位置自动判断谁是近点",
+        "  · 两点间距 = 中圈直径 18.3 米（半径 9.15 米）",
+        "",
+        "注：旧版提示写的是「水平直径 / 左端点 / 右端点」，与实际使用的",
+        "    世界坐标不一致，已更正为「近点 / 远点」。",
     ]
 
     CLICK_LABELS = [
-        "① 点击：中圈直径左端",
-        "② 点击：中圈直径右端",
+        "Click 1: NEAR point (lower on screen)",
+        "Click 2: FAR point (upper on screen)",
     ]
 
     def calibrate(self, frame: np.ndarray, attack_dir: str = None) -> Optional[FieldDetectionResult]:

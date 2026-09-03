@@ -121,11 +121,6 @@ class OffsideAnalyzer:
         # Step 4: Group by team
         attackers, defenders = self._separate_teams(field_players, attack_dir)
 
-        # ── DEBUG: frame summary ──
-        print(f"\n[Frame {frame_det.frame_idx}] {len(field_players)} players → "
-              f"{len(attackers)} ATK + {len(defenders)} DEF "
-              f"(dir={attack_dir.value})")
-
         if len(defenders) == 0:
             print(f"  ⚠ NO defenders found! Returning empty result.")
             return result
@@ -599,7 +594,11 @@ class OffsideAnalyzer:
 
     def _log_defenders(self, sorted_defs: List[Dict], attack_dir: AttackDirection,
                        use_pixel_fallback: bool = False):
-        """Log defender positions for manual verification."""
+        """Log defender positions (throttled to every 30 frames to avoid
+        terminal IO becoming the processing bottleneck)."""
+        self._log_frame_counter = getattr(self, "_log_frame_counter", 0) + 1
+        if self._log_frame_counter % 30 != 0:
+            return
         mode_label = "PIXEL" if use_pixel_fallback else "WORLD"
         print(f"\n  [Defenders] ({len(sorted_defs)} total, "
               f"attack_dir={attack_dir.value}, sort={mode_label}):")

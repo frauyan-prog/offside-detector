@@ -751,7 +751,12 @@ class PitchKeypointDetector:
 
         filtered = []
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            # cv2 4.x returns shape (N,1,4); cv2 5.x returns (N,4).
+            # Normalize both to [x1,y1,x2,y2].
+            seg = np.asarray(line).reshape(-1)
+            if seg.shape[0] < 4:
+                continue
+            x1, y1, x2, y2 = seg[0], seg[1], seg[2], seg[3]
             dx = x2 - x1
             dy = y2 - y1
             if abs(dx) < 1e-6:
